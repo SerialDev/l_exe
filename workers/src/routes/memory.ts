@@ -74,7 +74,7 @@ app.post('/', async (c) => {
     });
   }
 
-  const service = createMemoryService(c.env.DB);
+  const service = createMemoryService(c.env.DB, c.env.MEMORY_VECTORIZE, c.env.AI);
   const { type, key, value, metadata, importance, expiresAt } = parsed.data;
   const memory = await service.create(userId!, {
     type,
@@ -97,7 +97,7 @@ app.get('/', async (c) => {
   const userId = c.get('userId');
   const type = c.req.query('type') as MemoryType | undefined;
 
-  const service = createMemoryService(c.env.DB);
+  const service = createMemoryService(c.env.DB, c.env.MEMORY_VECTORIZE, c.env.AI);
   const memories = await service.listByUser(userId, type);
 
   // Group by type for convenience
@@ -124,7 +124,7 @@ app.get('/context', async (c) => {
   const userId = c.get('userId');
   const maxTokens = parseInt(c.req.query('maxTokens') || '1000', 10);
 
-  const service = createMemoryService(c.env.DB);
+  const service = createMemoryService(c.env.DB, c.env.MEMORY_VECTORIZE, c.env.AI);
   const context = await service.getContext(userId, maxTokens);
   const systemPrompt = getMemorySystemPrompt(context);
 
@@ -147,7 +147,7 @@ app.get('/search', async (c) => {
     throw new HTTPException(400, { message: 'Query parameter "q" is required' });
   }
 
-  const service = createMemoryService(c.env.DB);
+  const service = createMemoryService(c.env.DB, c.env.MEMORY_VECTORIZE, c.env.AI);
   const results = await service.search(userId, query, limit);
 
   return c.json({
@@ -165,7 +165,7 @@ app.get('/:id', async (c) => {
   const userId = c.get('userId');
   const { id } = c.req.param();
 
-  const service = createMemoryService(c.env.DB);
+  const service = createMemoryService(c.env.DB, c.env.MEMORY_VECTORIZE, c.env.AI);
   const memory = await service.getById(id, userId);
 
   if (!memory) {
@@ -191,7 +191,7 @@ app.put('/:id', async (c) => {
     });
   }
 
-  const service = createMemoryService(c.env.DB);
+  const service = createMemoryService(c.env.DB, c.env.MEMORY_VECTORIZE, c.env.AI);
   const memory = await service.update(id, userId, parsed.data);
 
   if (!memory) {
@@ -209,7 +209,7 @@ app.delete('/:id', async (c) => {
   const userId = c.get('userId');
   const { id } = c.req.param();
 
-  const service = createMemoryService(c.env.DB);
+  const service = createMemoryService(c.env.DB, c.env.MEMORY_VECTORIZE, c.env.AI);
   const deleted = await service.delete(id, userId);
 
   if (!deleted) {
@@ -234,7 +234,7 @@ app.delete('/', async (c) => {
     });
   }
 
-  const service = createMemoryService(c.env.DB);
+  const service = createMemoryService(c.env.DB, c.env.MEMORY_VECTORIZE, c.env.AI);
   
   let deleted: number;
   if (type) {
@@ -265,7 +265,7 @@ app.post('/extract', async (c) => {
     });
   }
 
-  const service = createMemoryService(c.env.DB);
+  const service = createMemoryService(c.env.DB, c.env.MEMORY_VECTORIZE, c.env.AI);
   const extracted = await service.extractFromText(
     userId,
     parsed.data.text,
@@ -284,7 +284,7 @@ app.post('/extract', async (c) => {
  */
 app.post('/cleanup', async (c) => {
   // This could be restricted to admins or run as a scheduled task
-  const service = createMemoryService(c.env.DB);
+  const service = createMemoryService(c.env.DB, c.env.MEMORY_VECTORIZE, c.env.AI);
   const deleted = await service.cleanupExpired();
 
   return c.json({

@@ -296,13 +296,13 @@ conversations.patch('/:id', zValidator('json', updateConversationSchema), async 
       }, 404);
     }
 
-    // Update
+    // Update with tenant isolation (include user_id in WHERE clause)
     await c.env.DB
-      .prepare('UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?')
-      .bind(updates.title, now, existing.id)
+      .prepare('UPDATE conversations SET title = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+      .bind(updates.title, now, existing.id, user.id)
       .run();
 
-    // Fetch updated
+    // Fetch updated with tenant isolation
     const updated = await c.env.DB
       .prepare(`
         SELECT 
@@ -313,9 +313,9 @@ conversations.patch('/:id', zValidator('json', updateConversationSchema), async 
           model,
           created_at as createdAt,
           updated_at as updatedAt
-        FROM conversations WHERE id = ?
+        FROM conversations WHERE id = ? AND user_id = ?
       `)
-      .bind(existing.id)
+      .bind(existing.id, user.id)
       .first();
 
     return c.json({
@@ -357,16 +357,16 @@ conversations.delete('/:id', async (c) => {
       }, 404);
     }
 
-    // Delete messages first (foreign key)
+    // Delete messages first (foreign key) - tenant isolation via conversation ownership already verified
     await c.env.DB
-      .prepare('DELETE FROM messages WHERE conversation_id = ?')
-      .bind(existing.conversation_id)
+      .prepare('DELETE FROM messages WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM conversations WHERE user_id = ?)')
+      .bind(existing.conversation_id, user.id)
       .run();
 
-    // Delete conversation
+    // Delete conversation with tenant isolation
     await c.env.DB
-      .prepare('DELETE FROM conversations WHERE id = ?')
-      .bind(existing.id)
+      .prepare('DELETE FROM conversations WHERE id = ? AND user_id = ?')
+      .bind(existing.id, user.id)
       .run();
 
     return c.json({
@@ -804,9 +804,10 @@ conversations.post('/:id/archive', async (c) => {
     const newStatus = existing.is_archived === 1 ? 0 : 1;
     const now = new Date().toISOString();
 
+    // Update with tenant isolation
     await c.env.DB
-      .prepare('UPDATE conversations SET is_archived = ?, updated_at = ? WHERE id = ?')
-      .bind(newStatus, now, existing.id)
+      .prepare('UPDATE conversations SET is_archived = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+      .bind(newStatus, now, existing.id, user.id)
       .run();
 
     return c.json({
@@ -857,9 +858,10 @@ conversations.post('/:id/pin', async (c) => {
     const newStatus = existing.is_pinned === 1 ? 0 : 1;
     const now = new Date().toISOString();
 
+    // Update with tenant isolation
     await c.env.DB
-      .prepare('UPDATE conversations SET is_pinned = ?, updated_at = ? WHERE id = ?')
-      .bind(newStatus, now, existing.id)
+      .prepare('UPDATE conversations SET is_pinned = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+      .bind(newStatus, now, existing.id, user.id)
       .run();
 
     return c.json({
@@ -1068,16 +1070,16 @@ conversations.delete('/', async (c) => {
           .first<{ id: string; conversation_id: string }>();
 
         if (existing) {
-          // Delete messages
+          // Delete messages with tenant isolation
           await c.env.DB
-            .prepare('DELETE FROM messages WHERE conversation_id = ?')
-            .bind(existing.conversation_id)
+            .prepare('DELETE FROM messages WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM conversations WHERE user_id = ?)')
+            .bind(existing.conversation_id, user.id)
             .run();
 
-          // Delete conversation
+          // Delete conversation with tenant isolation
           await c.env.DB
-            .prepare('DELETE FROM conversations WHERE id = ?')
-            .bind(existing.id)
+            .prepare('DELETE FROM conversations WHERE id = ? AND user_id = ?')
+            .bind(existing.id, user.id)
             .run();
 
           deleted++;

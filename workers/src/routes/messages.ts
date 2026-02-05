@@ -189,10 +189,10 @@ messages.post('/', zValidator('json', createMessageSchema), async (c) => {
       )
       .run();
 
-    // Update conversation timestamp
+    // Update conversation timestamp with tenant isolation
     await c.env.DB
-      .prepare('UPDATE conversations SET updated_at = ? WHERE id = ?')
-      .bind(now, conversation.id)
+      .prepare('UPDATE conversations SET updated_at = ? WHERE id = ? AND user_id = ?')
+      .bind(now, conversation.id, user.id)
       .run();
 
     return c.json({
@@ -257,28 +257,31 @@ messages.patch('/:id', zValidator('json', updateMessageSchema), async (c) => {
       }, 403);
     }
 
-    // Update message
+    // Update message with tenant isolation (via conversation join)
     await c.env.DB
-      .prepare('UPDATE messages SET content = ? WHERE id = ?')
-      .bind(updates.content, message.id)
+      .prepare(`UPDATE messages SET content = ? 
+                WHERE id = ? AND conversation_id IN (SELECT conversation_id FROM conversations WHERE user_id = ?)`)
+      .bind(updates.content, message.id, user.id)
       .run();
 
-    // Fetch updated
+    // Fetch updated with tenant isolation
     const updated = await c.env.DB
       .prepare(`
         SELECT 
-          id,
-          message_id as messageId,
-          conversation_id as conversationId,
-          parent_message_id as parentMessageId,
-          role,
-          content,
-          model,
-          endpoint,
-          created_at as createdAt
-        FROM messages WHERE id = ?
+          m.id,
+          m.message_id as messageId,
+          m.conversation_id as conversationId,
+          m.parent_message_id as parentMessageId,
+          m.role,
+          m.content,
+          m.model,
+          m.endpoint,
+          m.created_at as createdAt
+        FROM messages m
+        INNER JOIN conversations c ON m.conversation_id = c.conversation_id
+        WHERE m.id = ? AND c.user_id = ?
       `)
-      .bind(message.id)
+      .bind(message.id, user.id)
       .first();
 
     return c.json({
@@ -325,10 +328,11 @@ messages.delete('/:id', async (c) => {
       }, 404);
     }
 
-    // Delete the message
+    // Delete the message with tenant isolation (via conversation join)
     await c.env.DB
-      .prepare('DELETE FROM messages WHERE id = ?')
-      .bind(message.id)
+      .prepare(`DELETE FROM messages 
+                WHERE id = ? AND conversation_id IN (SELECT conversation_id FROM conversations WHERE user_id = ?)`)
+      .bind(message.id, user.id)
       .run();
 
     return c.json({
@@ -411,10 +415,10 @@ messages.post('/:conversationId/branch', zValidator('json', branchMessageSchema)
       )
       .run();
 
-    // Update conversation timestamp
+    // Update conversation timestamp with tenant isolation
     await c.env.DB
-      .prepare('UPDATE conversations SET updated_at = ? WHERE id = ?')
-      .bind(now, conversation.id)
+      .prepare('UPDATE conversations SET updated_at = ? WHERE id = ? AND user_id = ?')
+      .bind(now, conversation.id, user.id)
       .run();
 
     return c.json({

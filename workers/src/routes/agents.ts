@@ -353,9 +353,10 @@ agents.patch('/:id', zValidator('json', updateAgentSchema), async (c) => {
     fields.push('updated_at = ?');
     values.push(now);
     values.push(agentId);
+    values.push(user.id);
 
     await c.env.DB
-      .prepare(`UPDATE agents SET ${fields.join(', ')} WHERE id = ?`)
+      .prepare(`UPDATE agents SET ${fields.join(', ')} WHERE id = ? AND user_id = ?`)
       .bind(...values)
       .run();
 
@@ -367,9 +368,9 @@ agents.patch('/:id', zValidator('json', updateAgentSchema), async (c) => {
           model, endpoint, system_message as instructions,
           tools, model_parameters as modelParameters,
           is_public as isPublic, created_at as createdAt, updated_at as updatedAt
-        FROM agents WHERE id = ?
+        FROM agents WHERE id = ? AND user_id = ?
       `)
-      .bind(agentId)
+      .bind(agentId, user.id)
       .first<any>();
 
     const modelParameters = agent.modelParameters ? JSON.parse(agent.modelParameters) : {};
@@ -412,7 +413,7 @@ agents.delete('/:id', async (c) => {
       return c.json({ success: false, error: { message: 'Agent not found' } }, 404);
     }
 
-    await c.env.DB.prepare('DELETE FROM agents WHERE id = ?').bind(agentId).run();
+    await c.env.DB.prepare('DELETE FROM agents WHERE id = ? AND user_id = ?').bind(agentId, user.id).run();
 
     return c.json({ success: true, message: 'Agent deleted' });
   } catch (error) {

@@ -188,8 +188,8 @@ balance.get('/', async (c) => {
         const newCredits = balanceRecord.token_credits + balanceRecord.refill_amount;
         
         await c.env.DB
-          .prepare('UPDATE balances SET token_credits = ?, last_refill = ?, updated_at = ? WHERE id = ?')
-          .bind(newCredits, now, now, balanceRecord.id)
+          .prepare('UPDATE balances SET token_credits = ?, last_refill = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+          .bind(newCredits, now, now, balanceRecord.id, userId)
           .run();
 
         balanceRecord.token_credits = newCredits;
@@ -398,8 +398,8 @@ balance.post('/transactions', zValidator('json', createTransactionSchema), async
     // Deduct from balance
     const newBalance = balanceRecord.token_credits - tokens;
     await c.env.DB
-      .prepare('UPDATE balances SET token_credits = ?, updated_at = ? WHERE id = ?')
-      .bind(newBalance, now, balanceRecord.id)
+      .prepare('UPDATE balances SET token_credits = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+      .bind(newBalance, now, balanceRecord.id, userId)
       .run();
 
     return c.json({
@@ -485,16 +485,17 @@ balance.put('/', zValidator('json', updateBalanceSchema), async (c) => {
     }
 
     values.push(balanceRecord!.id);
+    values.push(userId);
 
     await c.env.DB
-      .prepare(`UPDATE balances SET ${setClauses.join(', ')} WHERE id = ?`)
+      .prepare(`UPDATE balances SET ${setClauses.join(', ')} WHERE id = ? AND user_id = ?`)
       .bind(...values)
       .run();
 
-    // Fetch updated
+    // Fetch updated (with tenant isolation)
     const updated = await c.env.DB
-      .prepare('SELECT * FROM balances WHERE id = ?')
-      .bind(balanceRecord!.id)
+      .prepare('SELECT * FROM balances WHERE id = ? AND user_id = ?')
+      .bind(balanceRecord!.id, userId)
       .first<BalanceRow>();
 
     return c.json({

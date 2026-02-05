@@ -47,14 +47,14 @@ id = "8924d602065c4722bcd4b331270b097a"
 binding = "RATE_LIMIT"
 id = "0c07717617204ebf875600885d368872"
 
-# Vectorize index for RAG (optional, requires beta access)
-# [[vectorize]]
-# binding = "VECTORIZE"
-# index_name = "l-exe-embeddings"
+# Vectorize index for memory similarity search
+[[vectorize]]
+binding = "MEMORY_VECTORIZE"
+index_name = "l-exe-memories"
 
-# AI binding for Workers AI (optional)
-# [ai]
-# binding = "AI"
+# AI binding for Workers AI (embeddings)
+[ai]
+binding = "AI"
 
 # Queue for background jobs (optional)
 # [[queues.producers]]

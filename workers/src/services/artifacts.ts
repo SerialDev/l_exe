@@ -424,11 +424,14 @@ export class ArtifactService {
       .bind(id, userId)
       .run();
 
-    // Also delete version history
-    await this.db
-      .prepare('DELETE FROM artifact_versions WHERE artifact_id = ?')
-      .bind(id)
-      .run();
+    // Also delete version history (tenant isolation via artifact ownership already verified above)
+    // Only delete versions if the artifact delete succeeded (confirming ownership)
+    if (result.meta.changes > 0) {
+      await this.db
+        .prepare('DELETE FROM artifact_versions WHERE artifact_id = ? AND artifact_id IN (SELECT id FROM artifacts WHERE user_id = ?)')
+        .bind(id, userId)
+        .run();
+    }
 
     return result.meta.changes > 0;
   }

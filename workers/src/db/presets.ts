@@ -97,12 +97,36 @@ function getDefaultKey(userId: string): string {
 
 /**
  * Find a preset by its unique ID
+ * @deprecated Use findByIdForUser instead for user-facing operations
  * @param db - D1 database instance
  * @param id - Preset ID
+ * @param userId - User ID (optional but recommended for tenant isolation)
  * @returns Preset or null if not found
  */
-export async function findById(db: D1Database, id: string): Promise<Preset | null> {
-  const stmt = db.prepare('SELECT * FROM presets WHERE id = ?').bind(id);
+export async function findById(db: D1Database, id: string, userId?: string): Promise<Preset | null> {
+  if (!userId) {
+    console.warn('[SECURITY] presets.findById called without userId - use with userId for tenant isolation');
+  }
+  const query = userId 
+    ? 'SELECT * FROM presets WHERE id = ? AND user_id = ?'
+    : 'SELECT * FROM presets WHERE id = ?';
+  const stmt = userId 
+    ? db.prepare(query).bind(id, userId)
+    : db.prepare(query).bind(id);
+  const result = await stmt.first<PresetRow>();
+  return result ? rowToPreset(result) : null;
+}
+
+/**
+ * Find a preset by ID with mandatory user ownership check
+ * Use this for user-facing operations
+ * @param db - D1 database instance
+ * @param id - Preset ID
+ * @param userId - User ID (required)
+ * @returns Preset or null if not found or not owned by user
+ */
+export async function findByIdForUser(db: D1Database, id: string, userId: string): Promise<Preset | null> {
+  const stmt = db.prepare('SELECT * FROM presets WHERE id = ? AND user_id = ?').bind(id, userId);
   const result = await stmt.first<PresetRow>();
   return result ? rowToPreset(result) : null;
 }
@@ -200,15 +224,17 @@ export async function create(db: D1Database, preset: CreatePresetData): Promise<
 }
 
 /**
- * Update an existing preset
+ * Update an existing preset with tenant isolation
  * @param db - D1 database instance
  * @param id - Preset ID
+ * @param userId - User ID (required for tenant isolation)
  * @param data - Fields to update
- * @returns Updated preset or null if not found
+ * @returns Updated preset or null if not found/not owned
  */
 export async function update(
   db: D1Database,
   id: string,
+  userId: string,
   data: UpdatePresetData
 ): Promise<Preset | null> {
   const fields: string[] = [];
@@ -244,14 +270,14 @@ export async function update(
   }
 
   if (fields.length === 0) {
-    return findById(db, id);
+    return findByIdForUser(db, id, userId);
   }
 
   fields.push("updated_at = datetime('now')");
-  values.push(id);
+  values.push(id, userId);
 
   const stmt = db
-    .prepare(`UPDATE presets SET ${fields.join(', ')} WHERE id = ?`)
+    .prepare(`UPDATE presets SET ${fields.join(', ')} WHERE id = ? AND user_id = ?`)
     .bind(...values);
 
   const result = await stmt.run();
@@ -259,32 +285,33 @@ export async function update(
     return null;
   }
 
-  return findById(db, id);
+  return findByIdForUser(db, id, userId);
 }
 
 /**
- * Delete a preset by ID
+ * Delete a preset by ID with tenant isolation
  * @param db - D1 database instance
  * @param id - Preset ID
+ * @param userId - User ID (REQUIRED for tenant isolation)
  * @param kv - Optional KV namespace to clear default if this preset was the default
- * @param userId - Required if kv is provided, to identify the user's default key
- * @returns True if deleted, false if not found
+ * @returns True if deleted, false if not found/not owned
  */
 export async function deletePreset(
   db: D1Database,
   id: string,
-  kv?: KVNamespace,
-  userId?: string
+  userId: string,
+  kv?: KVNamespace
 ): Promise<boolean> {
   // If KV is provided, check and clear default if needed
-  if (kv && userId) {
+  if (kv) {
     const defaultId = await kv.get(getDefaultKey(userId));
     if (defaultId === id) {
       await kv.delete(getDefaultKey(userId));
     }
   }
 
-  const stmt = db.prepare('DELETE FROM presets WHERE id = ?').bind(id);
+  // Delete with tenant isolation
+  const stmt = db.prepare('DELETE FROM presets WHERE id = ? AND user_id = ?').bind(id, userId);
   const result = await stmt.run();
   return result.meta.changes > 0;
 }
@@ -327,17 +354,20 @@ export async function clearDefault(kv: KVNamespace, userId: string): Promise<voi
  * Clone a preset with a new ID and optional modifications
  * @param db - D1 database instance
  * @param presetId - ID of preset to clone
+ * @param userId - User ID (required for tenant isolation)
  * @param newId - ID for the cloned preset
  * @param overrides - Optional fields to override in the clone
- * @returns Cloned preset or null if original not found
+ * @returns Cloned preset or null if original not found/not owned
  */
 export async function clone(
   db: D1Database,
   presetId: string,
+  userId: string,
   newId: string,
   overrides?: Partial<CreatePresetData>
 ): Promise<Preset | null> {
-  const original = await findById(db, presetId);
+  // Use tenant-isolated lookup
+  const original = await findByIdForUser(db, presetId, userId);
   if (!original) {
     return null;
   }

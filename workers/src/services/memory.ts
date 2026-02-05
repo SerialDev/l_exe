@@ -127,21 +127,161 @@ const EXTRACTION_PATTERNS = {
 
 export class MemoryService {
   private db: D1Database;
+  private vectorize?: VectorizeIndex;
+  private ai?: Ai;
 
-  constructor(db: D1Database) {
+  constructor(db: D1Database, vectorize?: VectorizeIndex, ai?: Ai) {
     this.db = db;
+    this.vectorize = vectorize;
+    this.ai = ai;
+  }
+
+  /**
+   * Generate embedding for text using Workers AI
+   */
+  private async generateEmbedding(text: string): Promise<number[] | null> {
+    if (!this.ai) {
+      console.log('[MemoryService] AI binding not available, skipping embedding');
+      return null;
+    }
+
+    try {
+      const result = await this.ai.run('@cf/baai/bge-base-en-v1.5', {
+        text: [text],
+      }) as any; // Workers AI type definition varies
+      
+      // The result structure is { data: [[...embedding]] } for batch input
+      if (result && result.data && Array.isArray(result.data) && result.data[0]) {
+        return result.data[0] as number[];
+      }
+      return null;
+    } catch (err) {
+      console.error('[MemoryService] Failed to generate embedding:', err);
+      return null;
+    }
+  }
+
+  /**
+   * Store embedding in Vectorize
+   */
+  private async storeEmbedding(memoryId: string, userId: string, embedding: number[]): Promise<void> {
+    if (!this.vectorize) {
+      console.log('[MemoryService] Vectorize not available, skipping embedding storage');
+      return;
+    }
+
+    try {
+      await this.vectorize.upsert([{
+        id: memoryId,
+        values: embedding,
+        metadata: { userId },
+      }]);
+      console.log(`[MemoryService] Stored embedding for memory ${memoryId}`);
+    } catch (err) {
+      console.error('[MemoryService] Failed to store embedding:', err);
+    }
+  }
+
+  /**
+   * Delete embedding from Vectorize
+   */
+  private async deleteEmbedding(memoryId: string): Promise<void> {
+    if (!this.vectorize) return;
+
+    try {
+      await this.vectorize.deleteByIds([memoryId]);
+      console.log(`[MemoryService] Deleted embedding for memory ${memoryId}`);
+    } catch (err) {
+      console.error('[MemoryService] Failed to delete embedding:', err);
+    }
+  }
+
+  /**
+   * Search memories by semantic similarity using Vectorize
+   * Returns top N most relevant memories for the given query
+   */
+  async searchBySimilarity(
+    userId: string, 
+    query: string, 
+    topK: number = 5
+  ): Promise<MemorySearchResult[]> {
+    // Fall back to keyword search if Vectorize not available
+    if (!this.vectorize || !this.ai) {
+      console.log('[MemoryService] Vectorize/AI not available, falling back to keyword search');
+      return this.search(userId, query, topK);
+    }
+
+    try {
+      // Generate embedding for the query
+      const queryEmbedding = await this.generateEmbedding(query);
+      if (!queryEmbedding) {
+        console.log('[MemoryService] Failed to generate query embedding, falling back to keyword search');
+        return this.search(userId, query, topK);
+      }
+
+      // Query Vectorize with user filter
+      const results = await this.vectorize.query(queryEmbedding, {
+        topK,
+        filter: { userId },
+        returnMetadata: 'all',
+      });
+
+      if (!results.matches || results.matches.length === 0) {
+        console.log('[MemoryService] No similar memories found in Vectorize');
+        return [];
+      }
+
+      // Fetch the actual memory records from D1
+      const memoryIds = results.matches.map(m => m.id);
+      const memories = await this.getByIds(userId, memoryIds);
+      
+      // Map scores to memories
+      const scored: MemorySearchResult[] = [];
+      for (const match of results.matches) {
+        const memory = memories.find(m => m.id === match.id);
+        if (memory) {
+          scored.push({
+            memory,
+            score: match.score,
+          });
+        }
+      }
+
+      console.log(`[MemoryService] Found ${scored.length} similar memories via Vectorize`);
+      return scored;
+    } catch (err) {
+      console.error('[MemoryService] Similarity search failed:', err);
+      return this.search(userId, query, topK);
+    }
+  }
+
+  /**
+   * Get multiple memories by IDs
+   */
+  async getByIds(userId: string, ids: string[]): Promise<Memory[]> {
+    if (ids.length === 0) return [];
+
+    const placeholders = ids.map(() => '?').join(',');
+    const rows = await this.db
+      .prepare(`SELECT * FROM memories WHERE id IN (${placeholders}) AND user_id = ?`)
+      .bind(...ids, userId)
+      .all<any>();
+
+    return (rows.results || []).map((row: any) => this.mapMemory(row));
   }
 
   /**
    * Create a new memory
    */
   async create(userId: string, input: CreateMemoryInput): Promise<Memory> {
+    console.log(`[MemoryService] create called - userId: ${userId}, type: ${input.type}, key: ${input.key}`);
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
 
     // Check for existing memory with same key
     const existing = await this.getByKey(userId, input.type, input.key);
     if (existing) {
+      console.log(`[MemoryService] Found existing memory with same key, updating instead`);
       // Update existing memory instead
       return this.update(existing.id, userId, {
         value: input.value,
@@ -150,27 +290,41 @@ export class MemoryService {
       }) as Promise<Memory>;
     }
 
-    await this.db
-      .prepare(`
-        INSERT INTO memories (id, user_id, type, key, value, metadata, source, conversation_id, importance, last_accessed_at, access_count, created_at, updated_at, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
-      `)
-      .bind(
-        id,
-        userId,
-        input.type,
-        input.key,
-        input.value,
-        input.metadata ? JSON.stringify(input.metadata) : null,
-        input.source || 'user',
-        input.conversationId || null,
-        input.importance ?? 0.5,
-        now,
-        now,
-        now,
-        input.expiresAt || null
-      )
-      .run();
+    console.log(`[MemoryService] Inserting new memory with id: ${id}`);
+    try {
+      await this.db
+        .prepare(`
+          INSERT INTO memories (id, user_id, type, key, value, metadata, source, conversation_id, importance, last_accessed_at, access_count, created_at, updated_at, expires_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+        `)
+        .bind(
+          id,
+          userId,
+          input.type,
+          input.key,
+          input.value,
+          input.metadata ? JSON.stringify(input.metadata) : null,
+          input.source || 'user',
+          input.conversationId || null,
+          input.importance ?? 0.5,
+          now,
+          now,
+          now,
+          input.expiresAt || null
+        )
+        .run();
+      console.log(`[MemoryService] INSERT successful for memory id: ${id}`);
+    } catch (err) {
+      console.error(`[MemoryService] INSERT FAILED:`, err);
+      throw err;
+    }
+
+    // Generate and store embedding for similarity search
+    const embeddingText = `${input.type}: ${input.key} - ${input.value}`;
+    const embedding = await this.generateEmbedding(embeddingText);
+    if (embedding) {
+      await this.storeEmbedding(id, userId, embedding);
+    }
 
     return {
       id,
@@ -201,8 +355,8 @@ export class MemoryService {
 
     if (!result) return null;
 
-    // Update access stats
-    await this.recordAccess(id);
+    // Update access stats (pass userId for tenant isolation)
+    await this.recordAccess(id, userId);
 
     return this.mapMemory(result);
   }
@@ -294,6 +448,11 @@ export class MemoryService {
       .prepare('DELETE FROM memories WHERE id = ? AND user_id = ?')
       .bind(id, userId)
       .run();
+
+    // Also delete from Vectorize
+    if (result.meta.changes > 0) {
+      await this.deleteEmbedding(id);
+    }
 
     return result.meta.changes > 0;
   }
@@ -408,29 +567,38 @@ export class MemoryService {
     text: string,
     conversationId?: string
   ): Promise<Memory[]> {
+    console.log(`[MemoryService] extractFromText called - userId: ${userId}, text: "${text.slice(0, 100)}"`);
     const extracted: Memory[] = [];
 
     // First, check for explicit "remember" commands - highest priority
     if (EXTRACTION_PATTERNS.remember) {
+      console.log(`[MemoryService] Checking ${EXTRACTION_PATTERNS.remember.length} remember patterns...`);
       for (const pattern of EXTRACTION_PATTERNS.remember) {
         const match = text.match(pattern);
+        console.log(`[MemoryService] Pattern ${pattern.toString()} match result: ${match ? 'YES' : 'NO'}`);
         if (match && match[1]) {
           const value = match[1].trim();
           // Create a custom memory with high importance
           const key = `remember_${Date.now()}`;
+          console.log(`[MemoryService] Creating memory with key: ${key}, value: "${value}"`);
           
-          const memory = await this.create(userId, {
-            type: 'custom',
-            key,
-            value,
-            source: 'user',
-            conversationId,
-            importance: 0.9, // High importance for explicit remembers
-          });
+          try {
+            const memory = await this.create(userId, {
+              type: 'custom',
+              key,
+              value,
+              source: 'user',
+              conversationId,
+              importance: 0.9, // High importance for explicit remembers
+            });
 
-          extracted.push(memory);
-          console.log(`[MemoryService] Saved explicit memory: "${value}"`);
-          return extracted; // Return early for explicit commands
+            extracted.push(memory);
+            console.log(`[MemoryService] SUCCESS - Saved explicit memory: "${value}" with id: ${memory.id}`);
+            return extracted; // Return early for explicit commands
+          } catch (err) {
+            console.error(`[MemoryService] FAILED to create memory:`, err);
+            throw err;
+          }
         }
       }
     }
@@ -514,10 +682,10 @@ export class MemoryService {
       addLine('');
     }
 
-    // Add standing instructions
+    // Add standing instructions (includes custom memories from explicit "remember" commands)
     if (context.instructions.length > 0) {
-      addLine('Standing Instructions:');
-      for (const inst of context.instructions.slice(0, 5)) {
+      addLine('Things to Remember:');
+      for (const inst of context.instructions.slice(0, 10)) {
         if (!addLine(`- ${inst.value}`)) break;
       }
       addLine('');
@@ -536,12 +704,16 @@ export class MemoryService {
 
   /**
    * Record memory access
+   * @param id - Memory ID
+   * @param userId - User ID for tenant isolation (REQUIRED)
    */
-  private async recordAccess(id: string): Promise<void> {
+  private async recordAccess(id: string, userId: string): Promise<void> {
     const now = new Date().toISOString();
+    
+    // ALWAYS include user_id in UPDATE for tenant isolation
     await this.db
-      .prepare('UPDATE memories SET last_accessed_at = ?, access_count = access_count + 1 WHERE id = ?')
-      .bind(now, id)
+      .prepare('UPDATE memories SET last_accessed_at = ?, access_count = access_count + 1 WHERE id = ? AND user_id = ?')
+      .bind(now, id, userId)
       .run();
   }
 
@@ -585,9 +757,16 @@ export class MemoryService {
 
 /**
  * Create memory service instance
+ * @param db - D1 Database
+ * @param vectorize - Optional Vectorize index for similarity search
+ * @param ai - Optional Workers AI for embeddings
  */
-export function createMemoryService(db: D1Database): MemoryService {
-  return new MemoryService(db);
+export function createMemoryService(
+  db: D1Database, 
+  vectorize?: VectorizeIndex, 
+  ai?: Ai
+): MemoryService {
+  return new MemoryService(db, vectorize, ai);
 }
 
 /**

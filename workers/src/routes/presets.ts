@@ -312,9 +312,10 @@ presets.patch('/:id', zValidator('json', updatePresetSchema), async (c) => {
     fields.push('updated_at = ?');
     values.push(now);
     values.push(presetId);
+    values.push(user.id);
 
     await c.env.DB
-      .prepare(`UPDATE presets SET ${fields.join(', ')} WHERE id = ?`)
+      .prepare(`UPDATE presets SET ${fields.join(', ')} WHERE id = ? AND user_id = ?`)
       .bind(...values)
       .run();
 
@@ -327,9 +328,9 @@ presets.patch('/:id', zValidator('json', updatePresetSchema), async (c) => {
           frequency_penalty as frequencyPenalty, presence_penalty as presencePenalty,
           system_message as systemMessage, is_default as isDefault,
           created_at as createdAt, updated_at as updatedAt
-        FROM presets WHERE id = ?
+        FROM presets WHERE id = ? AND user_id = ?
       `)
-      .bind(presetId)
+      .bind(presetId, user.id)
       .first();
 
     return c.json({
@@ -367,7 +368,7 @@ presets.delete('/:id', async (c) => {
       return c.json({ success: false, error: { message: 'Preset not found' } }, 404);
     }
 
-    await c.env.DB.prepare('DELETE FROM presets WHERE id = ?').bind(presetId).run();
+    await c.env.DB.prepare('DELETE FROM presets WHERE id = ? AND user_id = ?').bind(presetId, user.id).run();
 
     return c.json({ success: true, message: 'Preset deleted' });
   } catch (error) {

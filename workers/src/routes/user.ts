@@ -263,11 +263,11 @@ user.delete('/', async (c) => {
       .bind(authUser.id)
       .all<{ conversation_id: string }>();
 
-    // Delete all messages in user's conversations
+    // Delete all messages in user's conversations (with extra tenant isolation)
     for (const convo of convos.results || []) {
       await c.env.DB
-        .prepare('DELETE FROM messages WHERE conversation_id = ?')
-        .bind(convo.conversation_id)
+        .prepare('DELETE FROM messages WHERE conversation_id = ? AND conversation_id IN (SELECT conversation_id FROM conversations WHERE user_id = ?)')
+        .bind(convo.conversation_id, authUser.id)
         .run();
     }
 

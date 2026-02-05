@@ -283,8 +283,8 @@ share.post('/:conversationId', zValidator('json', createShareSchema), async (c) 
     // Update existing link
     const now = new Date().toISOString()
     await c.env.DB
-      .prepare('UPDATE shared_links SET updated_at = ? WHERE id = ?')
-      .bind(now, existing.id)
+      .prepare('UPDATE shared_links SET updated_at = ? WHERE id = ? AND user_id = ?')
+      .bind(now, existing.id, userId)
       .run()
     
     return c.json({
@@ -355,8 +355,8 @@ share.patch('/:shareId', async (c) => {
   const now = new Date().toISOString()
   
   await c.env.DB
-    .prepare('UPDATE shared_links SET is_public = ?, updated_at = ? WHERE id = ?')
-    .bind(newIsPublic, now, sharedLink.id)
+    .prepare('UPDATE shared_links SET is_public = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+    .bind(newIsPublic, now, sharedLink.id, userId)
     .run()
   
   return c.json({

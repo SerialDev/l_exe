@@ -86,24 +86,49 @@ function rowToFile(row: FileRow): FileMetadata {
 
 /**
  * Find a file by its unique ID
+ * @deprecated Use findByIdForUser instead for user-facing operations  
  * @param db - D1 database instance
  * @param id - File ID
+ * @param userId - User ID (optional but recommended for tenant isolation)
  * @returns File metadata or null if not found
  */
-export async function findById(db: D1Database, id: string): Promise<FileMetadata | null> {
-  const stmt = db.prepare('SELECT * FROM files WHERE id = ?').bind(id);
+export async function findById(db: D1Database, id: string, userId?: string): Promise<FileMetadata | null> {
+  if (!userId) {
+    console.warn('[SECURITY] files.findById called without userId - use findByIdForUser for tenant isolation');
+  }
+  const query = userId 
+    ? 'SELECT * FROM files WHERE id = ? AND user_id = ?'
+    : 'SELECT * FROM files WHERE id = ?';
+  const stmt = userId 
+    ? db.prepare(query).bind(id, userId)
+    : db.prepare(query).bind(id);
   const result = await stmt.first<FileRow>();
   return result ? rowToFile(result) : null;
 }
 
 /**
- * Find a file by its R2 storage key
+ * Find a file by ID with mandatory user ownership check
+ * Use this for user-facing operations
+ * @param db - D1 database instance
+ * @param id - File ID
+ * @param userId - User ID (required)
+ * @returns File metadata or null if not found or not owned by user
+ */
+export async function findByIdForUser(db: D1Database, id: string, userId: string): Promise<FileMetadata | null> {
+  const stmt = db.prepare('SELECT * FROM files WHERE id = ? AND user_id = ?').bind(id, userId);
+  const result = await stmt.first<FileRow>();
+  return result ? rowToFile(result) : null;
+}
+
+/**
+ * Find a file by its R2 storage key with tenant isolation
  * @param db - D1 database instance
  * @param r2Key - R2 object key
- * @returns File metadata or null if not found
+ * @param userId - User ID (required for tenant isolation)
+ * @returns File metadata or null if not found/not owned
  */
-export async function findByR2Key(db: D1Database, r2Key: string): Promise<FileMetadata | null> {
-  const stmt = db.prepare('SELECT * FROM files WHERE r2_key = ?').bind(r2Key);
+export async function findByR2Key(db: D1Database, r2Key: string, userId: string): Promise<FileMetadata | null> {
+  const stmt = db.prepare('SELECT * FROM files WHERE r2_key = ? AND user_id = ?').bind(r2Key, userId);
   const result = await stmt.first<FileRow>();
   return result ? rowToFile(result) : null;
 }
@@ -149,20 +174,21 @@ export async function findByUser(
 }
 
 /**
- * Find files by multiple IDs
+ * Find files by multiple IDs with tenant isolation
  * @param db - D1 database instance
  * @param ids - Array of file IDs
- * @returns List of found file metadata
+ * @param userId - User ID (required for tenant isolation)
+ * @returns List of found file metadata owned by user
  */
-export async function findByIds(db: D1Database, ids: string[]): Promise<FileMetadata[]> {
+export async function findByIds(db: D1Database, ids: string[], userId: string): Promise<FileMetadata[]> {
   if (ids.length === 0) {
     return [];
   }
 
   const placeholders = ids.map(() => '?').join(', ');
   const stmt = db
-    .prepare(`SELECT * FROM files WHERE id IN (${placeholders})`)
-    .bind(...ids);
+    .prepare(`SELECT * FROM files WHERE id IN (${placeholders}) AND user_id = ?`)
+    .bind(...ids, userId);
 
   const result = await stmt.all<FileRow>();
   return (result.results ?? []).map(rowToFile);
@@ -204,15 +230,17 @@ export async function create(db: D1Database, file: CreateFileData): Promise<File
 }
 
 /**
- * Update an existing file record
+ * Update an existing file record with tenant isolation
  * @param db - D1 database instance
  * @param id - File ID
+ * @param userId - User ID (required for tenant isolation)
  * @param data - Fields to update
- * @returns Updated file metadata or null if not found
+ * @returns Updated file metadata or null if not found/not owned
  */
 export async function update(
   db: D1Database,
   id: string,
+  userId: string,
   data: UpdateFileData
 ): Promise<FileMetadata | null> {
   const fields: string[] = [];
@@ -232,13 +260,13 @@ export async function update(
   }
 
   if (fields.length === 0) {
-    return findById(db, id);
+    return findByIdForUser(db, id, userId);
   }
 
-  values.push(id);
+  values.push(id, userId);
 
   const stmt = db
-    .prepare(`UPDATE files SET ${fields.join(', ')} WHERE id = ?`)
+    .prepare(`UPDATE files SET ${fields.join(', ')} WHERE id = ? AND user_id = ?`)
     .bind(...values);
 
   const result = await stmt.run();
@@ -246,24 +274,26 @@ export async function update(
     return null;
   }
 
-  return findById(db, id);
+  return findByIdForUser(db, id, userId);
 }
 
 /**
- * Delete a file record by ID
+ * Delete a file record by ID with tenant isolation
  * Note: This only deletes the metadata, the R2 object should be deleted separately
  * @param db - D1 database instance
  * @param id - File ID
- * @returns The deleted file metadata (for R2 cleanup) or null if not found
+ * @param userId - User ID (required for tenant isolation)
+ * @returns The deleted file metadata (for R2 cleanup) or null if not found/not owned
  */
-export async function deleteFile(db: D1Database, id: string): Promise<FileMetadata | null> {
-  // Get the file first so we can return it for R2 cleanup
-  const file = await findById(db, id);
+export async function deleteFile(db: D1Database, id: string, userId: string): Promise<FileMetadata | null> {
+  // Get the file first so we can return it for R2 cleanup (with tenant check)
+  const file = await findByIdForUser(db, id, userId);
   if (!file) {
     return null;
   }
 
-  const stmt = db.prepare('DELETE FROM files WHERE id = ?').bind(id);
+  // Delete with tenant isolation
+  const stmt = db.prepare('DELETE FROM files WHERE id = ? AND user_id = ?').bind(id, userId);
   await stmt.run();
 
   return file;

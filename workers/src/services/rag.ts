@@ -180,10 +180,10 @@ export class RAGService {
       }
     }
 
-    // Mark file as embedded
+    // Mark file as embedded with tenant isolation
     await this.db
-      .prepare('UPDATE files SET embedded = 1 WHERE id = ?')
-      .bind(fileId)
+      .prepare('UPDATE files SET embedded = 1 WHERE id = ? AND user_id = ?')
+      .bind(fileId, userId)
       .run();
 
     return { chunksCreated: chunks.length, totalTokens };
@@ -322,12 +322,24 @@ Answer based on the context provided:`;
 
   /**
    * Delete chunks for a file
+   * @param fileId - The file ID to delete chunks for
+   * @param userId - The user ID for tenant isolation (defense-in-depth)
    */
-  async deleteFileChunks(fileId: string): Promise<void> {
-    await this.db
-      .prepare('DELETE FROM document_chunks WHERE file_id = ?')
-      .bind(fileId)
-      .run();
+  async deleteFileChunks(fileId: string, userId?: string): Promise<void> {
+    // If userId provided, add tenant isolation (defense-in-depth)
+    if (userId) {
+      await this.db
+        .prepare('DELETE FROM document_chunks WHERE file_id = ? AND user_id = ?')
+        .bind(fileId, userId)
+        .run();
+    } else {
+      // Fallback for backwards compatibility - but log a warning
+      console.warn('[RAG] deleteFileChunks called without userId - potential security concern');
+      await this.db
+        .prepare('DELETE FROM document_chunks WHERE file_id = ?')
+        .bind(fileId)
+        .run();
+    }
   }
 }
 

@@ -91,12 +91,14 @@ function rowToMessage(row: MessageRow): Message {
 }
 
 /**
- * Find a message by its unique ID
+ * Find a message by its unique ID (INTERNAL USE ONLY - no user check)
+ * @deprecated Use findByIdForUser instead for user-facing operations
  * @param db - D1 database instance
  * @param id - Message ID
  * @returns Message or null if not found
  */
 export async function findById(db: D1Database, id: string): Promise<Message | null> {
+  console.warn('[SECURITY] messages.findById called without userId - use findByIdForUser for user operations');
   const stmt = db.prepare('SELECT * FROM messages WHERE id = ?').bind(id);
   const result = await stmt.first<MessageRow>();
   return result ? rowToMessage(result) : null;
@@ -191,15 +193,17 @@ export async function create(db: D1Database, message: CreateMessageData): Promis
 }
 
 /**
- * Update an existing message
+ * Update an existing message with user ownership verification via conversation
  * @param db - D1 database instance
  * @param id - Message ID
+ * @param userId - User ID (required for tenant isolation)
  * @param data - Fields to update
- * @returns Updated message or null if not found
+ * @returns Updated message or null if not found/not owned
  */
 export async function update(
   db: D1Database,
   id: string,
+  userId: string,
   data: UpdateMessageData
 ): Promise<Message | null> {
   const fields: string[] = [];
@@ -219,13 +223,15 @@ export async function update(
   }
 
   if (fields.length === 0) {
-    return findById(db, id);
+    return findByIdForUser(db, id, userId);
   }
 
-  values.push(id);
+  values.push(id, userId);
 
+  // Update with tenant isolation - join with conversations to verify ownership
   const stmt = db
-    .prepare(`UPDATE messages SET ${fields.join(', ')} WHERE id = ?`)
+    .prepare(`UPDATE messages SET ${fields.join(', ')} 
+              WHERE id = ? AND conversation_id IN (SELECT id FROM conversations WHERE user_id = ?)`)
     .bind(...values);
 
   const result = await stmt.run();
@@ -233,34 +239,42 @@ export async function update(
     return null;
   }
 
-  return findById(db, id);
+  return findByIdForUser(db, id, userId);
 }
 
 /**
- * Delete a message by ID
+ * Delete a message by ID with user ownership verification
  * @param db - D1 database instance
  * @param id - Message ID
- * @returns True if deleted, false if not found
+ * @param userId - User ID (required for tenant isolation)
+ * @returns True if deleted, false if not found/not owned
  */
-export async function deleteMessage(db: D1Database, id: string): Promise<boolean> {
-  const stmt = db.prepare('DELETE FROM messages WHERE id = ?').bind(id);
+export async function deleteMessage(db: D1Database, id: string, userId: string): Promise<boolean> {
+  // Delete with tenant isolation - join with conversations to verify ownership
+  const stmt = db.prepare(`DELETE FROM messages 
+                           WHERE id = ? AND conversation_id IN (SELECT id FROM conversations WHERE user_id = ?)`)
+    .bind(id, userId);
   const result = await stmt.run();
   return result.meta.changes > 0;
 }
 
 /**
- * Delete all messages in a conversation
+ * Delete all messages in a conversation with user ownership verification
  * @param db - D1 database instance
  * @param conversationId - Conversation ID
+ * @param userId - User ID (required for tenant isolation)
  * @returns Number of messages deleted
  */
 export async function deleteByConversation(
   db: D1Database,
-  conversationId: string
+  conversationId: string,
+  userId: string
 ): Promise<number> {
+  // Delete with tenant isolation - verify conversation belongs to user
   const stmt = db
-    .prepare('DELETE FROM messages WHERE conversation_id = ?')
-    .bind(conversationId);
+    .prepare(`DELETE FROM messages 
+              WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM conversations WHERE user_id = ?)`)
+    .bind(conversationId, userId);
   const result = await stmt.run();
   return result.meta.changes;
 }

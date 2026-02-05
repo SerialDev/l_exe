@@ -246,9 +246,10 @@ tags.put('/:tag', zValidator('json', updateTagSchema), async (c) => {
     }
 
     values.push(existing.id);
+    values.push(userId);
 
     await c.env.DB
-      .prepare(`UPDATE conversation_tags SET ${setClauses.join(', ')} WHERE id = ?`)
+      .prepare(`UPDATE conversation_tags SET ${setClauses.join(', ')} WHERE id = ? AND user_id = ?`)
       .bind(...values)
       .run();
 
@@ -268,17 +269,17 @@ tags.put('/:tag', zValidator('json', updateTagSchema), async (c) => {
           const tagsArray: string[] = JSON.parse(convo.tags);
           const newTags = tagsArray.map(t => t === tagParam ? updates.tag! : t);
           await c.env.DB
-            .prepare('UPDATE conversations SET tags = ? WHERE id = ?')
-            .bind(JSON.stringify(newTags), convo.id)
+            .prepare('UPDATE conversations SET tags = ? WHERE id = ? AND user_id = ?')
+            .bind(JSON.stringify(newTags), convo.id, userId)
             .run();
         }
       }
     }
 
-    // Fetch updated tag
+    // Fetch updated tag (with tenant isolation)
     const updated = await c.env.DB
-      .prepare('SELECT * FROM conversation_tags WHERE id = ?')
-      .bind(existing.id)
+      .prepare('SELECT * FROM conversation_tags WHERE id = ? AND user_id = ?')
+      .bind(existing.id, userId)
       .first<TagRow>();
 
     return c.json({
@@ -330,8 +331,8 @@ tags.delete('/:tag', async (c) => {
 
     // Delete the tag
     await c.env.DB
-      .prepare('DELETE FROM conversation_tags WHERE id = ?')
-      .bind(existing.id)
+      .prepare('DELETE FROM conversation_tags WHERE id = ? AND user_id = ?')
+      .bind(existing.id, userId)
       .run();
 
     // Remove tag from all conversations
@@ -348,8 +349,8 @@ tags.delete('/:tag', async (c) => {
         const tagsArray: string[] = JSON.parse(convo.tags);
         const newTags = tagsArray.filter(t => t !== tag);
         await c.env.DB
-          .prepare('UPDATE conversations SET tags = ? WHERE id = ?')
-          .bind(JSON.stringify(newTags), convo.id)
+          .prepare('UPDATE conversations SET tags = ? WHERE id = ? AND user_id = ?')
+          .bind(JSON.stringify(newTags), convo.id, userId)
           .run();
       }
     }
@@ -403,8 +404,8 @@ tags.put('/convo/:conversationId', zValidator('json', updateConvoTagsSchema), as
 
     // Update conversation tags
     await c.env.DB
-      .prepare('UPDATE conversations SET tags = ? WHERE id = ?')
-      .bind(JSON.stringify(newTags), conversationId)
+      .prepare('UPDATE conversations SET tags = ? WHERE id = ? AND user_id = ?')
+      .bind(JSON.stringify(newTags), conversationId, userId)
       .run();
 
     // Update tag counts - decrement for removed tags
@@ -428,8 +429,8 @@ tags.put('/convo/:conversationId', zValidator('json', updateConvoTagsSchema), as
 
       if (existingTag) {
         await c.env.DB
-          .prepare('UPDATE conversation_tags SET count = count + 1 WHERE id = ?')
-          .bind(existingTag.id)
+          .prepare('UPDATE conversation_tags SET count = count + 1 WHERE id = ? AND user_id = ?')
+          .bind(existingTag.id, userId)
           .run();
       } else {
         // Auto-create the tag

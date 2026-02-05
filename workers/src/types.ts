@@ -20,7 +20,10 @@ export interface Env {
   // Optional: Vectorize for RAG
   VECTORIZE?: VectorizeIndex;
   
-  // Optional: Workers AI
+  // Vectorize for memory similarity search
+  MEMORY_VECTORIZE?: VectorizeIndex;
+  
+  // Workers AI (for embeddings)
   AI?: Ai;
   
   // Optional: Durable Objects

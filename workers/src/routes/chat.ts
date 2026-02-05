@@ -183,15 +183,15 @@ chat.post('/ask', zValidator('json', askSchema), async (c) => {
 
     const response = await chatService.sendMessage(request);
 
-    // For temporary chats, delete the conversation after response
+    // For temporary chats, delete the conversation after response (with tenant isolation)
     if (data.temporary && response.conversationId) {
       await c.env.DB
-        .prepare('DELETE FROM messages WHERE conversation_id = ?')
-        .bind(response.conversationId)
+        .prepare('DELETE FROM messages WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM conversations WHERE user_id = ?)')
+        .bind(response.conversationId, user.id)
         .run();
       await c.env.DB
-        .prepare('DELETE FROM conversations WHERE id = ?')
-        .bind(response.conversationId)
+        .prepare('DELETE FROM conversations WHERE id = ? AND user_id = ?')
+        .bind(response.conversationId, user.id)
         .run();
       // Return without conversationId for temporary chats
       return c.json({

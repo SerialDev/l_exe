@@ -87,12 +87,16 @@ function rowToConversation(row: ConversationRow): Conversation {
 
 /**
  * Find a conversation by its unique ID
+ * @deprecated Use findByIdForUser instead - this function exists for internal/migration use only
  * @param db - D1 database instance
  * @param id - Conversation ID
- * @param userId - User ID (optional, for ownership verification)
+ * @param userId - User ID (NOW REQUIRED for tenant isolation)
  * @returns Conversation or null if not found
  */
 export async function findById(db: D1Database, id: string, userId?: string): Promise<Conversation | null> {
+  if (!userId) {
+    console.warn('[SECURITY] conversations.findById called without userId - use findByIdForUser');
+  }
   const query = userId 
     ? 'SELECT * FROM conversations WHERE id = ? AND user_id = ?'
     : 'SELECT * FROM conversations WHERE id = ?';
@@ -211,8 +215,8 @@ export async function create(
  * Update an existing conversation with ownership check
  * @param db - D1 database instance
  * @param id - Conversation ID
- * @param userId - User ID (for ownership verification)
  * @param data - Fields to update
+ * @param userId - User ID (REQUIRED for tenant isolation)
  * @returns Updated conversation or null if not found or not owned
  */
 export async function update(
@@ -221,6 +225,10 @@ export async function update(
   data: UpdateConversationData,
   userId?: string
 ): Promise<Conversation | null> {
+  if (!userId) {
+    console.warn('[SECURITY] conversations.update called without userId - this is a security risk');
+  }
+  
   const fields: string[] = [];
   const values: string[] = [];
 
@@ -238,7 +246,7 @@ export async function update(
   }
 
   if (fields.length === 0) {
-    return findById(db, id);
+    return findById(db, id, userId);
   }
 
   fields.push("updated_at = datetime('now')");
@@ -264,10 +272,13 @@ export async function update(
  * Delete a conversation by ID with ownership check
  * @param db - D1 database instance
  * @param id - Conversation ID
- * @param userId - User ID (for ownership verification)
+ * @param userId - User ID (REQUIRED for tenant isolation)
  * @returns True if deleted, false if not found or not owned
  */
 export async function deleteConversation(db: D1Database, id: string, userId?: string): Promise<boolean> {
+  if (!userId) {
+    console.warn('[SECURITY] deleteConversation called without userId - this is a security risk');
+  }
   const query = userId 
     ? 'DELETE FROM conversations WHERE id = ? AND user_id = ?'
     : 'DELETE FROM conversations WHERE id = ?';
@@ -284,12 +295,13 @@ export async function deleteConversation(db: D1Database, id: string, userId?: st
  * add an 'archived' column to the schema.
  * @param db - D1 database instance
  * @param id - Conversation ID
- * @returns True if archived, false if not found
+ * @param userId - User ID (required for tenant isolation)
+ * @returns True if archived, false if not found/not owned
  */
-export async function archive(db: D1Database, id: string): Promise<boolean> {
+export async function archive(db: D1Database, id: string, userId: string): Promise<boolean> {
   // For now, archiving is the same as deleting
   // To implement true archiving, add an 'archived' column to the schema
-  return deleteConversation(db, id);
+  return deleteConversation(db, id, userId);
 }
 
 /**
@@ -326,12 +338,13 @@ export async function search(
  * Touch a conversation to update its updated_at timestamp
  * @param db - D1 database instance
  * @param id - Conversation ID
- * @returns True if touched, false if not found
+ * @param userId - User ID (required for tenant isolation)
+ * @returns True if touched, false if not found/not owned
  */
-export async function touch(db: D1Database, id: string): Promise<boolean> {
+export async function touch(db: D1Database, id: string, userId: string): Promise<boolean> {
   const stmt = db
-    .prepare("UPDATE conversations SET updated_at = datetime('now') WHERE id = ?")
-    .bind(id);
+    .prepare("UPDATE conversations SET updated_at = datetime('now') WHERE id = ? AND user_id = ?")
+    .bind(id, userId);
   const result = await stmt.run();
   return result.meta.changes > 0;
 }

@@ -342,8 +342,8 @@ files.delete('/:id', async (c) => {
     // Delete from R2
     await c.env.FILES_BUCKET.delete(file.r2_key);
 
-    // Delete from database
-    await c.env.DB.prepare('DELETE FROM files WHERE id = ?').bind(fileId).run();
+    // Delete from database (include user_id for tenant isolation defense-in-depth)
+    await c.env.DB.prepare('DELETE FROM files WHERE id = ? AND user_id = ?').bind(fileId, user.id).run();
 
     return c.json({ success: true, message: 'File deleted' });
   } catch (error) {
@@ -522,14 +522,14 @@ files.delete('/:id/index', async (c) => {
       return c.json({ success: false, error: { message: 'File not found' } }, 404);
     }
 
-    // Delete chunks
+    // Delete chunks (pass userId for tenant isolation)
     const ragService = createRAGService(c.env as any);
-    await ragService.deleteFileChunks(fileId);
+    await ragService.deleteFileChunks(fileId, user.id);
 
-    // Update file embedded status
+    // Update file embedded status (include user_id for tenant isolation defense-in-depth)
     await c.env.DB
-      .prepare('UPDATE files SET embedded = 0 WHERE id = ?')
-      .bind(fileId)
+      .prepare('UPDATE files SET embedded = 0 WHERE id = ? AND user_id = ?')
+      .bind(fileId, user.id)
       .run();
 
     return c.json({ success: true, message: 'RAG index removed' });

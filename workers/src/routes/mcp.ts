@@ -387,19 +387,20 @@ mcp.put('/:id', zValidator('json', updateMCPServerSchema), async (c) => {
     }
 
     values.push(id);
+    values.push(userId);
 
     await c.env.DB
-      .prepare(`UPDATE mcp_servers SET ${setClauses.join(', ')} WHERE id = ?`)
+      .prepare(`UPDATE mcp_servers SET ${setClauses.join(', ')} WHERE id = ? AND user_id = ?`)
       .bind(...values)
       .run();
 
     // Clear cached capabilities
     await c.env.CACHE.delete(`mcp:${id}:capabilities`);
 
-    // Fetch updated
+    // Fetch updated (with tenant isolation)
     const updated = await c.env.DB
-      .prepare('SELECT * FROM mcp_servers WHERE id = ?')
-      .bind(id)
+      .prepare('SELECT * FROM mcp_servers WHERE id = ? AND user_id = ?')
+      .bind(id, userId)
       .first<MCPServerRow>();
 
     const metadata = updated!.metadata ? JSON.parse(updated!.metadata) : {};
@@ -448,8 +449,8 @@ mcp.delete('/:id', async (c) => {
     }
 
     await c.env.DB
-      .prepare('DELETE FROM mcp_servers WHERE id = ?')
-      .bind(id)
+      .prepare('DELETE FROM mcp_servers WHERE id = ? AND user_id = ?')
+      .bind(id, userId)
       .run();
 
     // Clear cached capabilities

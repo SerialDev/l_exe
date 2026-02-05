@@ -90,12 +90,16 @@ export class ChatService {
   private userId: string;
   private db: D1Database;
   private kv?: KVNamespace;
+  private vectorize?: VectorizeIndex;
+  private ai?: Ai;
 
   constructor(config: ChatServiceConfig) {
     this.env = config.env;
     this.userId = config.userId;
     this.db = config.env.DB;
     this.kv = (config.env as any).KV || (config.env as any).SESSIONS;
+    this.vectorize = config.env.MEMORY_VECTORIZE;
+    this.ai = config.env.AI;
   }
 
   /**
@@ -306,10 +310,10 @@ export class ChatService {
           
           summary = summaryResult.summary;
           
-          // Store summary in conversation for future use
+          // Store summary in conversation for future use (with tenant isolation)
           await this.db
-            .prepare('UPDATE conversations SET summary = ?, summary_token_count = ? WHERE id = ?')
-            .bind(summary, summaryResult.tokenCount, conversationId)
+            .prepare('UPDATE conversations SET summary = ?, summary_token_count = ? WHERE id = ? AND user_id = ?')
+            .bind(summary, summaryResult.tokenCount, conversationId, this.userId)
             .run();
           
           console.log(`[ChatService] Summary generated: ${summaryResult.tokenCount} tokens`);
@@ -577,22 +581,79 @@ When using information from web search:
   }
 
   /**
-   * Get user memory context
+   * Get memory context for the current user
+   * Uses similarity search if query is provided and Vectorize is available
    */
-  private async getMemoryContext(): Promise<MemoryContext | null> {
+  private async getMemoryContext(query?: string): Promise<MemoryContext | null> {
     try {
-      const memoryService = createMemoryService(this.db);
+      const memoryService = createMemoryService(this.db, this.vectorize, this.ai);
+      
+      // If query is provided and Vectorize is available, use similarity search
+      if (query && this.vectorize && this.ai) {
+        console.log(`[ChatService] Using similarity search for memory context, query: "${query.slice(0, 50)}..."`);
+        const similarMemories = await memoryService.searchBySimilarity(this.userId, query, 10);
+        
+        if (similarMemories.length > 0) {
+          console.log(`[ChatService] Found ${similarMemories.length} relevant memories via similarity search`);
+          
+          // Convert to MemoryContext format
+          const context: MemoryContext = {
+            facts: [],
+            preferences: [],
+            instructions: [],
+            projects: [],
+            recent: [],
+            contextText: '',
+          };
+          
+          const lines: string[] = ['## Relevant Memories'];
+          for (const { memory, score } of similarMemories) {
+            lines.push(`- [${memory.type}] ${memory.value} (relevance: ${(score * 100).toFixed(0)}%)`);
+            
+            // Also categorize for structured access
+            switch (memory.type) {
+              case 'fact':
+                context.facts.push(memory);
+                break;
+              case 'preference':
+                context.preferences.push(memory);
+                break;
+              case 'instruction':
+              case 'custom':
+                context.instructions.push(memory);
+                break;
+              case 'project':
+                context.projects.push(memory);
+                break;
+            }
+          }
+          
+          context.contextText = lines.join('\n');
+          return context;
+        }
+      }
+      
+      // Fall back to getting all memories
       const context = await memoryService.getContext(this.userId);
       
-      if (context.facts.length === 0 && context.preferences.length === 0 && 
-          context.instructions.length === 0 && context.projects.length === 0) {
+      const totalMemories = context.facts.length + context.preferences.length + 
+                           context.instructions.length + context.projects.length;
+      
+      if (totalMemories === 0) {
+        console.log(`[ChatService] No memories found for user ${this.userId}`);
         return null;
       }
       
       console.log(
-        `[ChatService] Memory context: ${context.facts.length} facts, ` +
-        `${context.preferences.length} preferences, ${context.instructions.length} instructions`
+        `[ChatService] Memory context for user ${this.userId}: ${context.facts.length} facts, ` +
+        `${context.preferences.length} preferences, ${context.instructions.length} instructions/custom, ` +
+        `${context.projects.length} projects. Context text length: ${context.contextText.length}`
       );
+      
+      // Debug: log first instruction if any
+      if (context.instructions.length > 0) {
+        console.log(`[ChatService] First instruction/memory: "${context.instructions[0].value}"`);
+      }
       
       return context;
     } catch (error) {
@@ -655,15 +716,23 @@ When using information from web search:
    * This is called asynchronously to avoid blocking the response
    */
   private async extractMemoriesFromText(text: string, conversationId: string): Promise<void> {
+    console.log(`[ChatService] extractMemoriesFromText called for user ${this.userId}, text: "${text.slice(0, 100)}..."`);
     try {
-      const memoryService = createMemoryService(this.db);
+      const memoryService = createMemoryService(this.db, this.vectorize, this.ai);
+      console.log(`[ChatService] Created memory service with Vectorize=${!!this.vectorize}, AI=${!!this.ai}`);
       const extracted = await memoryService.extractFromText(this.userId, text, conversationId);
       
       if (extracted.length > 0) {
-        console.log(`[ChatService] Extracted ${extracted.length} memories from user message`);
+        console.log(`[ChatService] SUCCESS: Extracted ${extracted.length} memories from user message for user ${this.userId}`);
+        for (const mem of extracted) {
+          console.log(`[ChatService] Saved memory: type=${mem.type}, key=${mem.key}, value="${mem.value}"`);
+        }
+      } else {
+        console.log(`[ChatService] No memories extracted from: "${text.slice(0, 50)}..."`);
       }
     } catch (error) {
-      console.warn('[ChatService] Failed to extract memories:', error);
+      console.error('[ChatService] Failed to extract memories:', error);
+      throw error; // Re-throw so caller can log it too
     }
   }
 
@@ -756,7 +825,7 @@ Title (no quotes, no punctuation at end):`;
     // Get memory context (enabled by default for personalization)
     let memoryContext: MemoryContext | null = null;
     if (request.enableMemory !== false) {
-      memoryContext = await this.getMemoryContext();
+      memoryContext = await this.getMemoryContext(request.text);
     }
     
     // Build system prompt with RAG and memory context
@@ -850,20 +919,42 @@ Title (no quotes, no punctuation at end):`;
     // Update conversation timestamp
     await conversationsDb.update(this.db, conversationId, {});
     
-    // Generate better title asynchronously for new conversations
+    // Run background tasks in parallel and AWAIT them before returning response
+    // This is critical for Cloudflare Workers - fire-and-forget tasks may be dropped
+    const backgroundTasks: Promise<void>[] = [];
+    
+    // Generate better title for new conversations
     if (isNewConversation) {
-      // Fire and forget - don't await
-      this.generateTitleAsync(conversationId, request.text, response.content).catch(() => {});
+      backgroundTasks.push(
+        this.generateTitleAsync(conversationId, request.text, response.content).catch((err) => {
+          console.error('[ChatService] Title generation failed:', err);
+        })
+      );
     }
     
-    // Extract memories from user message (fire and forget)
+    // Extract memories from user message
     if (request.enableMemory !== false) {
-      this.extractMemoriesFromText(request.text, conversationId).catch(() => {});
+      backgroundTasks.push(
+        this.extractMemoriesFromText(request.text, conversationId).catch((err) => {
+          console.error('[ChatService] Memory extraction failed:', err);
+        })
+      );
     }
     
-    // Extract and save artifacts from response (fire and forget, enabled by default)
+    // Extract and save artifacts from response
     if (request.enableArtifacts !== false) {
-      this.extractAndSaveArtifacts(conversationId, assistantMessageId, response.content).catch(() => {});
+      backgroundTasks.push(
+        this.extractAndSaveArtifacts(conversationId, assistantMessageId, response.content).catch((err) => {
+          console.error('[ChatService] Artifact extraction failed:', err);
+        })
+      );
+    }
+    
+    // Wait for all background tasks to complete
+    if (backgroundTasks.length > 0) {
+      console.log(`[ChatService] Awaiting ${backgroundTasks.length} background tasks...`);
+      await Promise.all(backgroundTasks);
+      console.log(`[ChatService] Background tasks completed`);
     }
     
     return {
@@ -920,7 +1011,7 @@ Title (no quotes, no punctuation at end):`;
     // Get memory context (enabled by default for personalization)
     let memoryContext: MemoryContext | null = null;
     if (request.enableMemory !== false) {
-      memoryContext = await this.getMemoryContext();
+      memoryContext = await this.getMemoryContext(request.text);
     }
     
     // Build system prompt with RAG and memory context
@@ -1108,19 +1199,43 @@ Title (no quotes, no punctuation at end):`;
         // Update conversation timestamp
         await conversationsDb.update(db, conversationId!, {});
         
-        // Generate better title for new conversations (fire and forget)
+        // Run background tasks in parallel and AWAIT them before sending done event
+        // This is critical for Cloudflare Workers - fire-and-forget tasks may be dropped
+        // when the worker terminates after the response is sent
+        const backgroundTasks: Promise<void>[] = [];
+        
+        // Generate better title for new conversations
         if (newConversation && fullContent) {
-          self.generateTitleAsync(conversationId!, request.text, fullContent).catch(() => {});
+          backgroundTasks.push(
+            self.generateTitleAsync(conversationId!, request.text, fullContent).catch((err) => {
+              console.error('[ChatService] Title generation failed (stream):', err);
+            })
+          );
         }
         
-        // Extract memories from user message (fire and forget)
+        // Extract memories from user message
         if (request.enableMemory !== false) {
-          self.extractMemoriesFromText(request.text, conversationId!).catch(() => {});
+          backgroundTasks.push(
+            self.extractMemoriesFromText(request.text, conversationId!).catch((err) => {
+              console.error('[ChatService] Memory extraction failed (stream):', err);
+            })
+          );
         }
         
-        // Extract and save artifacts from response (fire and forget, enabled by default)
+        // Extract and save artifacts from response
         if (request.enableArtifacts !== false && fullContent) {
-          self.extractAndSaveArtifacts(conversationId!, assistantMessageId, fullContent).catch(() => {});
+          backgroundTasks.push(
+            self.extractAndSaveArtifacts(conversationId!, assistantMessageId, fullContent).catch((err) => {
+              console.error('[ChatService] Artifact extraction failed (stream):', err);
+            })
+          );
+        }
+        
+        // Wait for all background tasks to complete before closing stream
+        if (backgroundTasks.length > 0) {
+          console.log(`[ChatService] Awaiting ${backgroundTasks.length} background tasks...`);
+          await Promise.all(backgroundTasks);
+          console.log(`[ChatService] Background tasks completed`);
         }
         
         // Send done event
@@ -1194,21 +1309,24 @@ Title (no quotes, no punctuation at end):`;
     messageId: string,
     options?: Partial<SendMessageRequest>
   ): Promise<SendMessageResponse> {
-    // Get the original message
-    const message = await messagesDb.findById(this.db, messageId);
+    // CRITICAL: Verify user owns this conversation first
+    await this.verifyConversationOwnership(conversationId);
+    
+    // Get the original message (use findByIdForUser for tenant isolation)
+    const message = await messagesDb.findByIdForUser(this.db, messageId, this.userId);
     if (!message) {
       throw new Error('Message not found');
     }
     
-    // Get the conversation
-    const conversation = await conversationsDb.findById(this.db, conversationId);
+    // Get the conversation (already verified ownership above)
+    const conversation = await conversationsDb.findByIdForUser(this.db, conversationId, this.userId);
     if (!conversation) {
       throw new Error('Conversation not found');
     }
     
-    // Find the user message that triggered this response
+    // Find the user message that triggered this response (use findByIdForUser for tenant isolation)
     const userMessage = message.parentMessageId
-      ? await messagesDb.findById(this.db, message.parentMessageId)
+      ? await messagesDb.findByIdForUser(this.db, message.parentMessageId, this.userId)
       : null;
     
     if (!userMessage || userMessage.role !== 'user') {
@@ -1238,8 +1356,11 @@ Title (no quotes, no punctuation at end):`;
     newText: string,
     options?: Partial<SendMessageRequest>
   ): Promise<SendMessageResponse> {
-    // Get the original message
-    const message = await messagesDb.findById(this.db, messageId);
+    // CRITICAL: Verify user owns this conversation first
+    await this.verifyConversationOwnership(conversationId);
+    
+    // Get the original message (use findByIdForUser for tenant isolation)
+    const message = await messagesDb.findByIdForUser(this.db, messageId, this.userId);
     if (!message) {
       throw new Error('Message not found');
     }
@@ -1248,8 +1369,8 @@ Title (no quotes, no punctuation at end):`;
       throw new Error('Can only edit user messages');
     }
     
-    // Get the conversation
-    const conversation = await conversationsDb.findById(this.db, conversationId);
+    // Get the conversation (already verified ownership above)
+    const conversation = await conversationsDb.findByIdForUser(this.db, conversationId, this.userId);
     if (!conversation) {
       throw new Error('Conversation not found');
     }
@@ -1277,8 +1398,11 @@ Title (no quotes, no punctuation at end):`;
     text: string,
     options?: Partial<SendMessageRequest>
   ): Promise<SendMessageResponse> {
-    // Get the conversation
-    const conversation = await conversationsDb.findById(this.db, conversationId);
+    // CRITICAL: Verify user owns this conversation first
+    await this.verifyConversationOwnership(conversationId);
+    
+    // Get the conversation (already verified ownership above)
+    const conversation = await conversationsDb.findByIdForUser(this.db, conversationId, this.userId);
     if (!conversation) {
       throw new Error('Conversation not found');
     }

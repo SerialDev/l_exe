@@ -275,11 +275,11 @@ prompts.post('/', zValidator('json', createPromptSchema), async (c) => {
       )
       .run();
 
-    // If this is part of a group, increment generation count
+    // If this is part of a group, increment generation count (with tenant isolation)
     if (groupId) {
       await c.env.DB
-        .prepare('UPDATE prompt_groups SET number_of_generations = number_of_generations + 1 WHERE id = ?')
-        .bind(groupId)
+        .prepare('UPDATE prompt_groups SET number_of_generations = number_of_generations + 1 WHERE id = ? AND author_id = ?')
+        .bind(groupId, userId)
         .run();
     }
 
@@ -357,16 +357,17 @@ prompts.put('/:id', zValidator('json', updatePromptSchema), async (c) => {
     }
 
     values.push(id);
+    values.push(userId);
 
     await c.env.DB
-      .prepare(`UPDATE prompts SET ${setClauses.join(', ')} WHERE id = ?`)
+      .prepare(`UPDATE prompts SET ${setClauses.join(', ')} WHERE id = ? AND author_id = ?`)
       .bind(...values)
       .run();
 
-    // Fetch updated
+    // Fetch updated (with tenant isolation)
     const updated = await c.env.DB
-      .prepare('SELECT * FROM prompts WHERE id = ?')
-      .bind(id)
+      .prepare('SELECT * FROM prompts WHERE id = ? AND author_id = ?')
+      .bind(id, userId)
       .first<PromptRow>();
 
     return c.json({
@@ -411,8 +412,8 @@ prompts.delete('/:id', async (c) => {
 
     // Delete
     await c.env.DB
-      .prepare('DELETE FROM prompts WHERE id = ?')
-      .bind(id)
+      .prepare('DELETE FROM prompts WHERE id = ? AND author_id = ?')
+      .bind(id, userId)
       .run();
 
     // If this was part of a group, decrement count and clear production_id if needed
@@ -422,9 +423,9 @@ prompts.delete('/:id', async (c) => {
           UPDATE prompt_groups 
           SET number_of_generations = MAX(0, number_of_generations - 1),
               production_id = CASE WHEN production_id = ? THEN NULL ELSE production_id END
-          WHERE id = ?
+          WHERE id = ? AND author_id = ?
         `)
-        .bind(id, existing.group_id)
+        .bind(id, existing.group_id, userId)
         .run();
     }
 
@@ -757,16 +758,17 @@ prompts.put('/groups/:id', zValidator('json', updateGroupSchema), async (c) => {
     }
 
     values.push(id);
+    values.push(userId);
 
     await c.env.DB
-      .prepare(`UPDATE prompt_groups SET ${setClauses.join(', ')} WHERE id = ?`)
+      .prepare(`UPDATE prompt_groups SET ${setClauses.join(', ')} WHERE id = ? AND author_id = ?`)
       .bind(...values)
       .run();
 
-    // Fetch updated
+    // Fetch updated (with tenant isolation)
     const updated = await c.env.DB
-      .prepare('SELECT * FROM prompt_groups WHERE id = ?')
-      .bind(id)
+      .prepare('SELECT * FROM prompt_groups WHERE id = ? AND author_id = ?')
+      .bind(id, userId)
       .first<PromptGroupRow>();
 
     return c.json({
@@ -815,16 +817,16 @@ prompts.delete('/groups/:id', async (c) => {
       return c.json({ success: false, error: 'Prompt group not found' }, 404);
     }
 
-    // Delete all prompts in the group first
+    // Delete all prompts in the group first (owned by this user)
     await c.env.DB
-      .prepare('DELETE FROM prompts WHERE group_id = ?')
-      .bind(id)
+      .prepare('DELETE FROM prompts WHERE group_id = ? AND author_id = ?')
+      .bind(id, userId)
       .run();
 
     // Delete the group
     await c.env.DB
-      .prepare('DELETE FROM prompt_groups WHERE id = ?')
-      .bind(id)
+      .prepare('DELETE FROM prompt_groups WHERE id = ? AND author_id = ?')
+      .bind(id, userId)
       .run();
 
     return c.json({
