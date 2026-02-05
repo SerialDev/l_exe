@@ -17,7 +17,23 @@ import type {
   StreamDoneEvent,
 } from '../types';
 
-const API_BASE = '/api';
+// Determine API base URL based on environment
+function getApiBase(): string {
+  // Check for environment variable first
+  if (import.meta.env.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL;
+  }
+  
+  // In production (pages.dev), use the worker URL
+  if (typeof window !== 'undefined' && window.location.hostname.includes('pages.dev')) {
+    return 'https://l-exe.datasloth.workers.dev/api';
+  }
+  
+  // In development or same-origin deployment, use relative path
+  return '/api';
+}
+
+const API_BASE = getApiBase();
 
 /**
  * Base fetch with cookie-based auth

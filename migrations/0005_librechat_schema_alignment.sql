@@ -29,6 +29,8 @@ ALTER TABLE conversations ADD COLUMN agent_id TEXT;
 -- MESSAGES TABLE - Add missing LibreChat fields
 -- ============================================================================
 
+ALTER TABLE messages ADD COLUMN message_id TEXT;
+ALTER TABLE messages ADD COLUMN is_created_by_user INTEGER DEFAULT 0;
 ALTER TABLE messages ADD COLUMN user_id TEXT;
 ALTER TABLE messages ADD COLUMN sender TEXT;
 ALTER TABLE messages ADD COLUMN text TEXT;

@@ -111,6 +111,14 @@ const EXTRACTION_PATTERNS = {
     /keep in mind (?:that )?(.+)/i,
     /note that (.+)/i,
   ],
+  // Explicit remember commands - highest priority
+  remember: [
+    /^remember (.+)/i,
+    /^please remember (.+)/i,
+    /^save (?:this: )?(.+)/i,
+    /^store (?:this: )?(.+)/i,
+    /^memorize (.+)/i,
+  ],
 };
 
 // =============================================================================
@@ -363,6 +371,10 @@ export class MemoryService {
     const preferences = all.filter(m => m.type === 'preference');
     const projects = all.filter(m => m.type === 'project');
     const instructions = all.filter(m => m.type === 'instruction');
+    const custom = all.filter(m => m.type === 'custom');
+    
+    // Include custom memories in instructions (they're explicit user requests)
+    const allInstructions = [...instructions, ...custom];
     
     // Get recently accessed (across all types)
     const recent = [...all]
@@ -374,7 +386,7 @@ export class MemoryService {
       facts,
       preferences,
       projects,
-      instructions,
+      instructions: allInstructions,
       recent,
     }, maxTokens);
 
@@ -382,7 +394,7 @@ export class MemoryService {
       facts,
       preferences,
       projects,
-      instructions,
+      instructions: allInstructions,
       recent,
       contextText,
     };
@@ -398,8 +410,36 @@ export class MemoryService {
   ): Promise<Memory[]> {
     const extracted: Memory[] = [];
 
-    // Try each extraction pattern
+    // First, check for explicit "remember" commands - highest priority
+    if (EXTRACTION_PATTERNS.remember) {
+      for (const pattern of EXTRACTION_PATTERNS.remember) {
+        const match = text.match(pattern);
+        if (match && match[1]) {
+          const value = match[1].trim();
+          // Create a custom memory with high importance
+          const key = `remember_${Date.now()}`;
+          
+          const memory = await this.create(userId, {
+            type: 'custom',
+            key,
+            value,
+            source: 'user',
+            conversationId,
+            importance: 0.9, // High importance for explicit remembers
+          });
+
+          extracted.push(memory);
+          console.log(`[MemoryService] Saved explicit memory: "${value}"`);
+          return extracted; // Return early for explicit commands
+        }
+      }
+    }
+
+    // Try each extraction pattern for implicit memory extraction
     for (const [category, patterns] of Object.entries(EXTRACTION_PATTERNS)) {
+      // Skip the remember patterns (already handled above)
+      if (category === 'remember') continue;
+      
       for (const pattern of patterns) {
         const match = text.match(pattern);
         if (match && match[1]) {

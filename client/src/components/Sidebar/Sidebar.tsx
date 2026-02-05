@@ -245,7 +245,7 @@ export function Sidebar({ isOpen, onToggle, onOpenSettings }: SidebarProps) {
                     ) : (
                       <>
                         <span className="flex-1 text-sm truncate">
-                          {conv.title}
+                          {conv.title || 'New Chat'}
                         </span>
                         
                         <div className="hidden group-hover:flex items-center gap-1">

@@ -19,10 +19,24 @@ import { twoFactorClient } from 'better-auth/client/plugins';
  * 
  * We use the current window origin so the Vite proxy handles routing.
  */
+// Determine API base URL based on environment
+function getApiBaseUrl(): string {
+  // Check for environment variable first
+  if (import.meta.env.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL.replace('/api', '');
+  }
+  
+  // In production (pages.dev), use the worker URL
+  if (typeof window !== 'undefined' && window.location.hostname.includes('pages.dev')) {
+    return 'https://l-exe.datasloth.workers.dev';
+  }
+  
+  // In development or same-origin deployment, use current origin
+  return typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
+}
+
 export const authClient = createAuthClient({
-  // Use current origin - Vite proxy handles /api -> backend in dev
-  // typeof window check for SSR safety (though we don't use SSR)
-  baseURL: typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000',
+  baseURL: getApiBaseUrl(),
   
   // Plugins
   plugins: [

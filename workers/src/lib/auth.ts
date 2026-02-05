@@ -83,6 +83,10 @@ export function createAuth(env: Env) {
 
   // Determine if we're in development mode (localhost)
   const isDev = baseURL?.includes('localhost') || baseURL?.includes('127.0.0.1');
+  
+  // Check if frontend and backend are on different domains (cross-origin)
+  const isCrossOrigin = clientURL && baseURL && 
+    new URL(clientURL).hostname !== new URL(baseURL).hostname;
 
   return betterAuth({
     // Database - Use Kysely with D1 dialect
@@ -106,15 +110,16 @@ export function createAuth(env: Env) {
       },
     },
 
-    // Advanced cookie settings for cross-origin (frontend on 3000, backend on 8787)
+    // Advanced cookie settings for cross-origin
     advanced: {
-      // In development, we need sameSite: 'none' for cross-origin cookies
-      // but 'none' requires 'secure: true' which doesn't work on localhost without HTTPS
-      // So we use 'lax' for development and let the frontend proxy handle it OR
-      // we configure the cookie to work cross-port on same hostname
+      // For cross-origin (frontend on pages.dev, backend on workers.dev):
+      // - sameSite: 'none' is required for cross-origin cookie sending
+      // - secure: true is required when sameSite is 'none'
+      // For same-origin or development with proxy:
+      // - sameSite: 'lax' works fine
       defaultCookieAttributes: {
-        sameSite: isDev ? 'lax' : 'lax',
-        secure: !isDev, // Only secure in production (requires HTTPS)
+        sameSite: isCrossOrigin ? 'none' : (isDev ? 'lax' : 'lax'),
+        secure: isCrossOrigin || !isDev, // Always secure for cross-origin or production
         httpOnly: true,
         path: '/',
       },

@@ -11,8 +11,8 @@ local_protocol = "http"
 # Environment variables (secrets should be set via wrangler secret put)
 [vars]
 APP_TITLE = "L_EXE"
-DOMAIN_SERVER = "http://localhost:8787"
-DOMAIN_CLIENT = "http://localhost:3000"
+DOMAIN_SERVER = "https://l-exe.datasloth.workers.dev"
+DOMAIN_CLIENT = "https://l-exe-app.pages.dev"
 ALLOW_EMAIL_LOGIN = "true"
 ALLOW_REGISTRATION = "true"
 ALLOW_SOCIAL_LOGIN = "false"
@@ -24,28 +24,28 @@ REFRESH_TOKEN_EXPIRY = "(1000 * 60 * 60 * 24) * 7"
 [[d1_databases]]
 binding = "DB"
 database_name = "l_exe_db"
-database_id = "placeholder-replace-with-actual-id"
+database_id = "43249e77-8477-41eb-9dad-c552e3b701f9"
 migrations_dir = "migrations"
 
-# R2 Storage binding for files
-[[r2_buckets]]
-binding = "FILES_BUCKET"
-bucket_name = "l-exe-files"
+# R2 Storage binding for files (enable R2 in dashboard first)
+# [[r2_buckets]]
+# binding = "FILES_BUCKET"
+# bucket_name = "l-exe-files"
 
-# R2 Storage binding for images
-[[r2_buckets]]
-binding = "IMAGES_BUCKET"
-bucket_name = "l-exe-images"
+# R2 Storage binding for images (enable R2 in dashboard first)
+# [[r2_buckets]]
+# binding = "IMAGES_BUCKET"
+# bucket_name = "l-exe-images"
 
 # KV Namespace for sessions/cache
 [[kv_namespaces]]
 binding = "SESSIONS"
-id = "placeholder-replace-with-actual-id"
+id = "8924d602065c4722bcd4b331270b097a"
 
 # KV Namespace for rate limiting
 [[kv_namespaces]]
 binding = "RATE_LIMIT"
-id = "placeholder-replace-with-actual-id"
+id = "0c07717617204ebf875600885d368872"
 
 # Vectorize index for RAG (optional, requires beta access)
 # [[vectorize]]
