@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+client/node_modules/
+
+# Build outputs
+dist/
+client/dist/
+.wrangler/
+
+# Environment variables (contains secrets)
+.dev.vars
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+
+# Testing
+coverage/
+
+# Wrangler
+.wrangler/
+worker-configuration.d.ts
+
+# Local database
+*.sqlite
+*.sqlite3
+.mf/

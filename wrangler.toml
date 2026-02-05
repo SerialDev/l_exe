@@ -1,0 +1,79 @@
+name = "l-exe"
+main = "workers/src/index.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+# Development settings
+[dev]
+port = 8787
+local_protocol = "http"
+
+# Environment variables (secrets should be set via wrangler secret put)
+[vars]
+APP_TITLE = "L_EXE"
+DOMAIN_SERVER = "http://localhost:8787"
+DOMAIN_CLIENT = "http://localhost:3000"
+ALLOW_EMAIL_LOGIN = "true"
+ALLOW_REGISTRATION = "true"
+ALLOW_SOCIAL_LOGIN = "false"
+ALLOW_SOCIAL_REGISTRATION = "false"
+SESSION_EXPIRY = "1000 * 60 * 15"
+REFRESH_TOKEN_EXPIRY = "(1000 * 60 * 60 * 24) * 7"
+
+# D1 Database binding
+[[d1_databases]]
+binding = "DB"
+database_name = "l_exe_db"
+database_id = "placeholder-replace-with-actual-id"
+migrations_dir = "migrations"
+
+# R2 Storage binding for files
+[[r2_buckets]]
+binding = "FILES_BUCKET"
+bucket_name = "l-exe-files"
+
+# R2 Storage binding for images
+[[r2_buckets]]
+binding = "IMAGES_BUCKET"
+bucket_name = "l-exe-images"
+
+# KV Namespace for sessions/cache
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "placeholder-replace-with-actual-id"
+
+# KV Namespace for rate limiting
+[[kv_namespaces]]
+binding = "RATE_LIMIT"
+id = "placeholder-replace-with-actual-id"
+
+# Vectorize index for RAG (optional, requires beta access)
+# [[vectorize]]
+# binding = "VECTORIZE"
+# index_name = "l-exe-embeddings"
+
+# AI binding for Workers AI (optional)
+# [ai]
+# binding = "AI"
+
+# Queue for background jobs (optional)
+# [[queues.producers]]
+# queue = "l-exe-jobs"
+# binding = "JOBS_QUEUE"
+
+# Durable Objects for real-time features (optional)
+# [[durable_objects.bindings]]
+# name = "CONVERSATIONS"
+# class_name = "ConversationDurableObject"
+
+# [[migrations]]
+# tag = "v1"
+# new_classes = ["ConversationDurableObject"]
+
+# Production environment overrides
+[env.production]
+vars = { DOMAIN_SERVER = "https://your-domain.com", DOMAIN_CLIENT = "https://your-domain.com" }
+
+# Staging environment
+[env.staging]
+vars = { DOMAIN_SERVER = "https://staging.your-domain.com", DOMAIN_CLIENT = "https://staging.your-domain.com" }

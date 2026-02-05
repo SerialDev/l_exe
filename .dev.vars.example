@@ -1,0 +1,59 @@
+# =============================================================================
+# L_EXE Cloudflare Workers - Development Variables
+# =============================================================================
+# Copy this file to .dev.vars for local development
+# These are loaded automatically by wrangler dev
+
+# =============================================================================
+# JWT Secrets (REQUIRED)
+# Generate with: openssl rand -base64 32
+# =============================================================================
+JWT_SECRET=your-jwt-secret-here-min-32-chars
+JWT_REFRESH_SECRET=your-refresh-secret-here-min-32-chars
+
+# =============================================================================
+# AI Provider API Keys (at least one required for chat)
+# =============================================================================
+
+# OpenAI
+OPENAI_API_KEY=sk-...
+
+# Anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+
+# Google AI (Gemini)
+GOOGLE_AI_API_KEY=AIza...
+
+# Azure OpenAI (optional)
+AZURE_OPENAI_API_KEY=
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
+
+# =============================================================================
+# OAuth Providers (optional - for social login)
+# =============================================================================
+
+# Google OAuth
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+
+# GitHub OAuth
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+
+# Discord OAuth
+DISCORD_CLIENT_ID=
+DISCORD_CLIENT_SECRET=
+
+# =============================================================================
+# Email Service (optional - for password reset, verification)
+# =============================================================================
+EMAIL_SERVICE=resend
+EMAIL_FROM=noreply@yourdomain.com
+EMAIL_API_KEY=re_...
+
+# =============================================================================
+# Encryption Keys (for storing user API keys)
+# Generate with: openssl rand -base64 32
+# =============================================================================
+CREDS_KEY=your-encryption-key-32-chars
+CREDS_IV=your-iv-16-chars
