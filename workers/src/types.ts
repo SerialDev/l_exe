@@ -106,6 +106,16 @@ export interface Env {
   // File upload limits
   MAX_FILE_SIZE?: string;
   MAX_IMAGE_SIZE?: string;
+  
+  // Access Control (comma-separated email lists)
+  ADMIN_EMAILS?: string;    // Emails that get admin tier automatically
+  ALLOWED_EMAILS?: string;  // Emails that get pro tier automatically
+  
+  // Stripe (for future billing integration)
+  STRIPE_SECRET_KEY?: string;
+  STRIPE_WEBHOOK_SECRET?: string;
+  STRIPE_PRICE_ID_BASIC?: string;
+  STRIPE_PRICE_ID_PRO?: string;
 }
 
 // Authenticated user attached to context
@@ -135,6 +145,19 @@ export interface Variables {
   imageService?: ImageGenService | null;
   speechService?: SpeechService;
   interpreter?: CodeInterpreterService;
+  // Subscription context (set by subscription middleware)
+  subscriptionTier?: 'free' | 'basic' | 'pro' | 'admin';
+  subscriptionLimited?: boolean;
+  remainingTokens?: number;
+  remainingRequests?: number;
+  requestBody?: any;  // Cached request body for downstream use
+  usageInfo?: {       // Set by route to record usage
+    tokens?: number;
+    promptTokens?: number;
+    completionTokens?: number;
+    provider?: string;
+    model?: string;
+  };
 }
 
 // Hono app environment type

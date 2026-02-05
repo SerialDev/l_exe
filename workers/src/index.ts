@@ -19,9 +19,11 @@ import { AppError, RateLimitError } from './middleware/error';
 import { devLogger } from './middleware/logging';
 import { requireAuth, type AuthContext } from './middleware/auth';
 import { apiRateLimiter, authRateLimiter } from './middleware/rateLimit';
+import { requireSubscription, requireAdmin } from './middleware/subscription';
 
 // Import services
 import { createChatService } from './services/chat';
+import { createSubscriptionService } from './services/subscription';
 
 // Import better-auth
 import { createAuth } from './lib/auth';
@@ -254,8 +256,12 @@ app.use('/api/convsearch/*', requireAuth);
 // API routes (mounted AFTER auth middleware)
 app.route('/api', api);
 
+// Admin routes
+import { admin } from './routes/admin';
+app.route('/api/admin', admin);
+
 // ============================================================================
-// Chat/Streaming Endpoint
+// Chat/Streaming Endpoint (with subscription check)
 // ============================================================================
 
 app.post('/api/ask/:endpoint', requireAuth, async (c) => {
@@ -265,6 +271,23 @@ app.post('/api/ask/:endpoint', requireAuth, async (c) => {
   
   if (!user) {
     return c.json({ success: false, error: { code: 'UNAUTHORIZED', message: 'User not authenticated' } }, 401);
+  }
+  
+  // Check subscription access
+  const subscriptionService = createSubscriptionService(c.env);
+  const accessCheck = await subscriptionService.checkAccess(user.id, endpoint, body.model);
+  
+  if (!accessCheck.allowed) {
+    return c.json({
+      success: false,
+      error: {
+        code: 'SUBSCRIPTION_REQUIRED',
+        message: accessCheck.reason || 'Subscription required for this feature',
+        tier: accessCheck.tier,
+        remainingTokens: accessCheck.remainingTokens,
+        remainingRequests: accessCheck.remainingRequests,
+      },
+    }, 403);
   }
   
   try {
@@ -282,9 +305,26 @@ app.post('/api/ask/:endpoint', requireAuth, async (c) => {
       maxTokens: body.maxOutputTokens,
     });
     
+    // Record usage
+    if (response.tokenCount) {
+      await subscriptionService.recordUsage(user.id, response.tokenCount, {
+        endpoint: `/api/ask/${endpoint}`,
+        provider: endpoint,
+        model: body.model || 'gpt-4o',
+        totalTokens: response.tokenCount,
+        requestId: c.get('requestId'),
+        success: true,
+      });
+    }
+    
     return c.json({
       success: true,
       ...response,
+      subscription: {
+        tier: accessCheck.tier,
+        remainingTokens: accessCheck.remainingTokens,
+        remainingRequests: accessCheck.remainingRequests,
+      },
     });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -299,7 +339,7 @@ app.post('/api/ask/:endpoint', requireAuth, async (c) => {
   }
 });
 
-// SSE streaming endpoint
+// SSE streaming endpoint (with subscription check)
 app.post('/api/ask/:endpoint/stream', requireAuth, async (c) => {
   const endpoint = c.req.param('endpoint');
   const body = await c.req.json();
@@ -307,6 +347,34 @@ app.post('/api/ask/:endpoint/stream', requireAuth, async (c) => {
   
   if (!user) {
     return c.json({ success: false, error: { code: 'UNAUTHORIZED', message: 'User not authenticated' } }, 401);
+  }
+  
+  // Check subscription access
+  const subscriptionService = createSubscriptionService(c.env);
+  const accessCheck = await subscriptionService.checkAccess(user.id, endpoint, body.model);
+  
+  if (!accessCheck.allowed) {
+    // Return error as SSE event for consistency with streaming response
+    const encoder = new TextEncoder();
+    const errorStream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({
+          code: 'SUBSCRIPTION_REQUIRED',
+          message: accessCheck.reason || 'Subscription required for this feature',
+          tier: accessCheck.tier,
+        })}\n\n`));
+        controller.close();
+      },
+    });
+    
+    return new Response(errorStream, {
+      status: 403,
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'X-Request-ID': c.get('requestId'),
+      },
+    });
   }
   
   try {
@@ -328,12 +396,15 @@ app.post('/api/ask/:endpoint/stream', requireAuth, async (c) => {
       signal, // Pass the abort signal to detect client disconnects
     });
     
+    // Note: Usage recording for streaming happens in the chat service after stream completes
+    
     return new Response(stream, {
       headers: {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
         'Connection': 'keep-alive',
         'X-Request-ID': c.get('requestId'),
+        'X-Subscription-Tier': accessCheck.tier,
       },
     });
   } catch (error) {

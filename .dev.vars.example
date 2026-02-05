@@ -57,3 +57,24 @@ EMAIL_API_KEY=re_...
 # =============================================================================
 CREDS_KEY=your-encryption-key-32-chars
 CREDS_IV=your-iv-16-chars
+
+# =============================================================================
+# Access Control (who can use your API keys)
+# =============================================================================
+
+# Comma-separated list of emails that get ADMIN tier (full access + admin panel)
+ADMIN_EMAILS=admin@example.com,owner@example.com
+
+# Comma-separated list of emails that get PRO tier (all models, higher limits)
+ALLOWED_EMAILS=friend@example.com,colleague@example.com
+
+# Note: Users not in either list will get FREE tier (no API access)
+# You can also manage access via the admin panel at /api/admin/*
+
+# =============================================================================
+# Stripe Integration (optional - for billing)
+# =============================================================================
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_PRICE_ID_BASIC=price_...
+STRIPE_PRICE_ID_PRO=price_...
