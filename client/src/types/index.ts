@@ -68,6 +68,7 @@ export interface Message {
   error?: boolean;
   unfinished?: boolean;
   tokenCount?: number;
+  isEncrypted?: boolean; // E2EE: true if content is encrypted
   createdAt: string;
 }
 

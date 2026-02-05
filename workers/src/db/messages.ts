@@ -17,6 +17,7 @@ export interface MessageRow {
   token_count: number | null;
   finish_reason: string | null;
   attachments: string | null; // JSON array of file references
+  is_encrypted: number | null; // 1 if content is E2EE encrypted
   created_at: string;
 }
 
@@ -34,6 +35,7 @@ export interface Message {
   tokenCount: number | null;
   finishReason: string | null;
   attachments: string | null; // JSON array of file references
+  isEncrypted: boolean; // true if content is E2EE encrypted
   createdAt: string;
 }
 
@@ -51,6 +53,7 @@ export interface CreateMessageData {
   tokenCount?: number;
   finishReason?: string;
   attachments?: string | null; // JSON array of file references
+  isEncrypted?: number; // 1 if content is E2EE encrypted
 }
 
 /**
@@ -86,22 +89,9 @@ function rowToMessage(row: MessageRow): Message {
     tokenCount: row.token_count,
     finishReason: row.finish_reason,
     attachments: row.attachments,
+    isEncrypted: row.is_encrypted === 1,
     createdAt: row.created_at,
   };
-}
-
-/**
- * Find a message by its unique ID (INTERNAL USE ONLY - no user check)
- * @deprecated Use findByIdForUser instead for user-facing operations
- * @param db - D1 database instance
- * @param id - Message ID
- * @returns Message or null if not found
- */
-export async function findById(db: D1Database, id: string): Promise<Message | null> {
-  console.warn('[SECURITY] messages.findById called without userId - use findByIdForUser for user operations');
-  const stmt = db.prepare('SELECT * FROM messages WHERE id = ?').bind(id);
-  const result = await stmt.first<MessageRow>();
-  return result ? rowToMessage(result) : null;
 }
 
 /**
@@ -123,34 +113,50 @@ export async function findByIdForUser(db: D1Database, id: string, userId: string
 
 /**
  * Find all messages in a conversation, ordered by creation time
+ * REQUIRES userId for tenant isolation - verifies conversation ownership
  * @param db - D1 database instance
  * @param conversationId - Conversation ID
+ * @param userId - User ID (required for tenant isolation)
  * @returns List of messages in chronological order
  */
 export async function findByConversation(
   db: D1Database,
-  conversationId: string
+  conversationId: string,
+  userId: string
 ): Promise<Message[]> {
   const stmt = db
-    .prepare('SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC')
-    .bind(conversationId);
+    .prepare(`
+      SELECT m.* FROM messages m
+      INNER JOIN conversations c ON m.conversation_id = c.id
+      WHERE m.conversation_id = ? AND c.user_id = ?
+      ORDER BY m.created_at ASC
+    `)
+    .bind(conversationId, userId);
   const result = await stmt.all<MessageRow>();
   return (result.results ?? []).map(rowToMessage);
 }
 
 /**
  * Find messages by parent message ID (for branching conversations)
+ * REQUIRES userId for tenant isolation - verifies conversation ownership
  * @param db - D1 database instance
  * @param parentMessageId - Parent message ID
+ * @param userId - User ID (required for tenant isolation)
  * @returns List of child messages
  */
 export async function findByParent(
   db: D1Database,
-  parentMessageId: string
+  parentMessageId: string,
+  userId: string
 ): Promise<Message[]> {
   const stmt = db
-    .prepare('SELECT * FROM messages WHERE parent_message_id = ? ORDER BY created_at ASC')
-    .bind(parentMessageId);
+    .prepare(`
+      SELECT m.* FROM messages m
+      INNER JOIN conversations c ON m.conversation_id = c.id
+      WHERE m.parent_message_id = ? AND c.user_id = ?
+      ORDER BY m.created_at ASC
+    `)
+    .bind(parentMessageId, userId);
   const result = await stmt.all<MessageRow>();
   return (result.results ?? []).map(rowToMessage);
 }
@@ -166,8 +172,8 @@ export async function create(db: D1Database, message: CreateMessageData): Promis
   const now = new Date().toISOString();
   const stmt = db
     .prepare(
-      `INSERT INTO messages (id, conversation_id, parent_message_id, role, content, model, endpoint, token_count, finish_reason, attachments, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO messages (id, conversation_id, parent_message_id, role, content, model, endpoint, token_count, finish_reason, attachments, is_encrypted, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       message.id,
@@ -180,16 +186,32 @@ export async function create(db: D1Database, message: CreateMessageData): Promis
       message.tokenCount ?? null,
       message.finishReason ?? null,
       message.attachments ?? null,
+      message.isEncrypted ?? 0,
       now
     );
 
-  await stmt.run();
-
-  const created = await findById(db, message.id);
-  if (!created) {
+  const result = await stmt.run();
+  
+  if (!result.success) {
     throw new Error('Failed to create message');
   }
-  return created;
+
+  // Return the message directly from input data instead of re-querying
+  // This avoids needing an unprotected findById and is more efficient
+  return {
+    id: message.id,
+    conversationId: message.conversationId,
+    parentMessageId: message.parentMessageId ?? null,
+    role: message.role,
+    content: message.content,
+    model: message.model ?? null,
+    endpoint: message.endpoint ?? null,
+    tokenCount: message.tokenCount ?? null,
+    finishReason: message.finishReason ?? null,
+    attachments: message.attachments ?? null,
+    isEncrypted: message.isEncrypted === 1,
+    createdAt: now,
+  };
 }
 
 /**
@@ -359,55 +381,73 @@ async function searchFallback(
 
 /**
  * Get the latest message in a conversation
+ * REQUIRES userId for tenant isolation - verifies conversation ownership
  * @param db - D1 database instance
  * @param conversationId - Conversation ID
+ * @param userId - User ID (required for tenant isolation)
  * @returns Latest message or null if conversation is empty
  */
 export async function getLatest(
   db: D1Database,
-  conversationId: string
+  conversationId: string,
+  userId: string
 ): Promise<Message | null> {
   const stmt = db
-    .prepare(
-      'SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 1'
-    )
-    .bind(conversationId);
+    .prepare(`
+      SELECT m.* FROM messages m
+      INNER JOIN conversations c ON m.conversation_id = c.id
+      WHERE m.conversation_id = ? AND c.user_id = ?
+      ORDER BY m.created_at DESC LIMIT 1
+    `)
+    .bind(conversationId, userId);
   const result = await stmt.first<MessageRow>();
   return result ? rowToMessage(result) : null;
 }
 
 /**
  * Count messages in a conversation
+ * REQUIRES userId for tenant isolation - verifies conversation ownership
  * @param db - D1 database instance
  * @param conversationId - Conversation ID
+ * @param userId - User ID (required for tenant isolation)
  * @returns Total count of messages
  */
 export async function countByConversation(
   db: D1Database,
-  conversationId: string
+  conversationId: string,
+  userId: string
 ): Promise<number> {
   const stmt = db
-    .prepare('SELECT COUNT(*) as count FROM messages WHERE conversation_id = ?')
-    .bind(conversationId);
+    .prepare(`
+      SELECT COUNT(*) as count FROM messages m
+      INNER JOIN conversations c ON m.conversation_id = c.id
+      WHERE m.conversation_id = ? AND c.user_id = ?
+    `)
+    .bind(conversationId, userId);
   const result = await stmt.first<{ count: number }>();
   return result?.count ?? 0;
 }
 
 /**
  * Get total token count for a conversation
+ * REQUIRES userId for tenant isolation - verifies conversation ownership
  * @param db - D1 database instance
  * @param conversationId - Conversation ID
+ * @param userId - User ID (required for tenant isolation)
  * @returns Total token count (sum of all messages)
  */
 export async function getTotalTokens(
   db: D1Database,
-  conversationId: string
+  conversationId: string,
+  userId: string
 ): Promise<number> {
   const stmt = db
-    .prepare(
-      'SELECT COALESCE(SUM(token_count), 0) as total FROM messages WHERE conversation_id = ?'
-    )
-    .bind(conversationId);
+    .prepare(`
+      SELECT COALESCE(SUM(m.token_count), 0) as total FROM messages m
+      INNER JOIN conversations c ON m.conversation_id = c.id
+      WHERE m.conversation_id = ? AND c.user_id = ?
+    `)
+    .bind(conversationId, userId);
   const result = await stmt.first<{ total: number }>();
   return result?.total ?? 0;
 }

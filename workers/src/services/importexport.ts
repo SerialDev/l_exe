@@ -24,6 +24,7 @@ export interface ImportedConversation {
   model?: string;
   endpoint?: string;
   createdAt?: string;
+  systemMessage?: string;  // Custom instructions / system prompt
 }
 
 export interface ExportedConversation {
@@ -44,14 +45,25 @@ export interface ExportedConversation {
 export interface ImportResult {
   success: boolean;
   conversationId?: string;
+  title?: string;
   error?: string;
   messagesImported: number;
+  systemMessage?: string;  // Extracted custom instructions (if any)
+}
+
+export interface ExtractedProfile {
+  id: string;           // Hash of the profile content
+  content: string;      // The full system message / custom instructions
+  conversationCount: number;  // How many conversations used this profile
+  firstSeen?: string;   // Title of first conversation with this profile
 }
 
 export interface BulkImportResult {
   total: number;
   successful: number;
   failed: number;
+  withSystemMessage: number;  // Count of conversations with custom instructions
+  uniqueProfiles: ExtractedProfile[];  // Deduplicated profiles found
   results: ImportResult[];
 }
 
@@ -60,6 +72,8 @@ export interface BulkImportResult {
 // =============================================================================
 
 interface ChatGPTExport {
+  id?: string;
+  conversation_id?: string;
   title: string;
   create_time: number;
   update_time: number;
@@ -68,71 +82,261 @@ interface ChatGPTExport {
     message?: {
       id: string;
       author: {
-        role: 'user' | 'assistant' | 'system';
+        role: 'user' | 'assistant' | 'system' | 'tool';
+        name?: string;
       };
       content: {
         content_type: string;
-        parts?: string[];
+        parts?: Array<string | Record<string, unknown>>;
         text?: string;
+        language?: string;
       };
       create_time?: number;
+      metadata?: {
+        model_slug?: string;
+        [key: string]: unknown;
+      };
     };
-    parent?: string;
+    parent?: string | null;
     children: string[];
   }>;
-  conversation_id?: string;
+  current_node?: string;
+  default_model_slug?: string;
+  is_archived?: boolean;
 }
 
-function parseChatGPTExport(data: ChatGPTExport): ImportedConversation {
-  const messages: ImportedConversation['messages'] = [];
+/**
+ * Normalize ChatGPT model slug to standard format
+ */
+function normalizeChatGPTModel(modelSlug: string | null | undefined): string {
+  if (!modelSlug) return 'gpt-4';
   
-  // Build message tree
-  const mapping = data.mapping;
-  const processed = new Set<string>();
+  const slug = modelSlug.toLowerCase();
   
-  function processNode(nodeId: string) {
-    if (processed.has(nodeId)) return;
-    processed.add(nodeId);
-    
-    const node = mapping[nodeId];
-    if (!node) return;
-    
-    if (node.message && node.message.content) {
-      const content = node.message.content.parts?.join('\n') || 
-                     node.message.content.text || 
-                     '';
-      
-      if (content.trim() && node.message.author.role !== 'system') {
-        messages.push({
-          role: node.message.author.role as 'user' | 'assistant',
-          content: content.trim(),
-          timestamp: node.message.create_time 
-            ? new Date(node.message.create_time * 1000).toISOString()
-            : undefined,
-        });
-      }
+  if (slug.includes('gpt-4o')) return 'gpt-4o';
+  if (slug.includes('gpt-4-turbo')) return 'gpt-4-turbo';
+  if (slug.includes('gpt-4')) return 'gpt-4';
+  if (slug.includes('gpt-3.5')) return 'gpt-3.5-turbo';
+  if (slug.includes('o1-preview')) return 'o1-preview';
+  if (slug.includes('o1-mini')) return 'o1-mini';
+  if (slug === 'auto') return 'gpt-4';
+  
+  return modelSlug;
+}
+
+/**
+ * Extract text content from ChatGPT message content
+ */
+function extractChatGPTContent(content: ChatGPTExport['mapping'][string]['message']['content']): string {
+  if (!content) return '';
+  
+  const { content_type, parts, text, language } = content;
+  
+  // Simple text content
+  if (content_type === 'text' && parts && parts.length > 0) {
+    const textParts = parts.filter((p): p is string => typeof p === 'string');
+    return textParts.join('\n');
+  }
+  
+  // Multimodal content - extract text parts only
+  if (content_type === 'multimodal_text' && parts) {
+    const textParts = parts.filter((p): p is string => typeof p === 'string');
+    return textParts.join('\n');
+  }
+  
+  // Code content
+  if (content_type === 'code' && text) {
+    return `\`\`\`${language || ''}\n${text}\n\`\`\``;
+  }
+  
+  // Execution output
+  if (content_type === 'execution_output' && text) {
+    return `Output:\n${text}`;
+  }
+  
+  // Reasoning/thinking content (o1, o3 models)
+  if ((content_type === 'thoughts' || content_type === 'reasoning_recap') && parts) {
+    const textParts = parts.filter((p): p is string => typeof p === 'string');
+    if (textParts.length > 0) {
+      return `<thinking>\n${textParts.join('\n')}\n</thinking>`;
     }
-    
-    // Process children in order
-    for (const childId of node.children) {
-      processNode(childId);
+    return '';
+  }
+  
+  // Web browsing results
+  if (content_type === 'tether_browsing_display' && parts) {
+    const textParts = parts.filter((p): p is string => typeof p === 'string');
+    return textParts.join('\n');
+  }
+  
+  // Quoted text from web
+  if (content_type === 'tether_quote' && parts) {
+    const textParts = parts.filter((p): p is string => typeof p === 'string');
+    if (textParts.length > 0) {
+      return `> ${textParts.join('\n> ')}`;
+    }
+    return '';
+  }
+  
+  // Skip system errors (not useful for imported conversations)
+  if (content_type === 'system_error') {
+    return '';
+  }
+  
+  // Skip user profile context (already captured in conversation metadata)
+  if (content_type === 'user_editable_context') {
+    return '';
+  }
+  
+  return '';
+}
+
+/**
+ * Extract system message / custom instructions from ChatGPT export
+ */
+function extractChatGPTSystemMessage(mapping: ChatGPTExport['mapping']): string | undefined {
+  if (!mapping) return undefined;
+  
+  // Look for user_editable_context which contains custom instructions
+  for (const node of Object.values(mapping)) {
+    const content = node.message?.content;
+    if (content?.content_type === 'user_editable_context') {
+      const parts: string[] = [];
+      
+      // Extract user profile (about_user)
+      const userProfile = (content as { user_profile?: string }).user_profile;
+      if (userProfile && typeof userProfile === 'string') {
+        // Extract the actual content after the boilerplate
+        const match = userProfile.match(/User profile:\s*```([^`]+)```/s);
+        if (match) {
+          parts.push(`[User Profile]\n${match[1].trim()}`);
+        }
+      }
+      
+      // Extract user instructions (about_model / how to respond)
+      const userInstructions = (content as { user_instructions?: string }).user_instructions;
+      if (userInstructions && typeof userInstructions === 'string') {
+        // Extract the actual content after the boilerplate
+        const match = userInstructions.match(/```([^`]+)```/s);
+        if (match) {
+          parts.push(`[Custom Instructions]\n${match[1].trim()}`);
+        }
+      }
+      
+      if (parts.length > 0) {
+        return parts.join('\n\n');
+      }
     }
   }
   
-  // Find root node and process
-  const rootNode = Object.values(mapping).find(n => !n.parent);
-  if (rootNode) {
-    for (const childId of rootNode.children) {
-      processNode(childId);
+  return undefined;
+}
+
+/**
+ * Parse ChatGPT export - follows current_node path for linear history
+ * This correctly handles branching conversations by following the active path
+ */
+function parseChatGPTExport(data: ChatGPTExport): ImportedConversation & { 
+  originalId?: string; 
+  isArchived?: boolean;
+  model?: string;
+  systemMessage?: string;
+} {
+  const messages: ImportedConversation['messages'] = [];
+  const mapping = data.mapping;
+  
+  // Extract system message / custom instructions
+  const systemMessage = extractChatGPTSystemMessage(mapping);
+  
+  // Use current_node to build linear path (correct for branching conversations)
+  if (data.current_node && mapping) {
+    // Traverse backwards from current_node to root
+    const path: string[] = [];
+    let nodeId: string | null | undefined = data.current_node;
+    
+    while (nodeId) {
+      const node = mapping[nodeId];
+      if (!node) break;
+      path.push(nodeId);
+      nodeId = node.parent;
+    }
+    
+    // Reverse to get root-to-current order
+    path.reverse();
+    
+    // Extract messages from path
+    for (const nid of path) {
+      const node = mapping[nid];
+      const msg = node?.message;
+      
+      if (!msg) continue;
+      
+      const role = msg.author?.role;
+      
+      // Only include user and assistant messages
+      if (role !== 'user' && role !== 'assistant') continue;
+      
+      const content = extractChatGPTContent(msg.content);
+      if (!content.trim()) continue;
+      
+      messages.push({
+        role: role as 'user' | 'assistant',
+        content: content.trim(),
+        timestamp: msg.create_time 
+          ? new Date(msg.create_time * 1000).toISOString()
+          : undefined,
+      });
+    }
+  } else {
+    // Fallback: process all nodes (original implementation)
+    const processed = new Set<string>();
+    
+    function processNode(nodeId: string) {
+      if (processed.has(nodeId)) return;
+      processed.add(nodeId);
+      
+      const node = mapping[nodeId];
+      if (!node) return;
+      
+      if (node.message && node.message.content) {
+        const content = extractChatGPTContent(node.message.content);
+        
+        if (content.trim() && node.message.author.role !== 'system' && node.message.author.role !== 'tool') {
+          messages.push({
+            role: node.message.author.role as 'user' | 'assistant',
+            content: content.trim(),
+            timestamp: node.message.create_time 
+              ? new Date(node.message.create_time * 1000).toISOString()
+              : undefined,
+          });
+        }
+      }
+      
+      // Process children in order
+      for (const childId of node.children) {
+        processNode(childId);
+      }
+    }
+    
+    // Find root node and process
+    const rootNode = Object.values(mapping).find(n => !n.parent);
+    if (rootNode) {
+      for (const childId of rootNode.children) {
+        processNode(childId);
+      }
     }
   }
   
   return {
     title: data.title || 'Imported Conversation',
     messages,
+    model: normalizeChatGPTModel(data.default_model_slug),
     createdAt: data.create_time 
       ? new Date(data.create_time * 1000).toISOString()
       : new Date().toISOString(),
+    originalId: data.id || data.conversation_id,
+    isArchived: data.is_archived,
+    systemMessage,
   };
 }
 
@@ -319,6 +523,12 @@ export class ImportExportService {
       return 'json';
     }
 
+    // If it's an array, check the first element
+    if (Array.isArray(data)) {
+      if (data.length === 0) return 'json';
+      return this.detectFormat(data[0]);
+    }
+
     const obj = data as Record<string, unknown>;
 
     // ChatGPT format has 'mapping' with message tree
@@ -377,17 +587,47 @@ export class ImportExportService {
    */
   async importConversation(
     userId: string,
-    conversation: ImportedConversation
+    conversation: ImportedConversation & { originalId?: string; isArchived?: boolean; systemMessage?: string }
   ): Promise<ImportResult> {
     try {
+      // Skip empty conversations
+      if (!conversation.messages || conversation.messages.length === 0) {
+        return {
+          success: false,
+          title: conversation.title,
+          error: 'No messages in conversation',
+          messagesImported: 0,
+          systemMessage: conversation.systemMessage,
+        };
+      }
+
+      // Use original ID if available to prevent duplicates
+      const conversationId = conversation.originalId || crypto.randomUUID();
+      
+      // Check if already imported
+      const existing = await this.db
+        .prepare('SELECT id FROM conversations WHERE id = ? AND user_id = ?')
+        .bind(conversationId, userId)
+        .first();
+      
+      if (existing) {
+        return {
+          success: false,
+          title: conversation.title,
+          error: 'Conversation already imported',
+          messagesImported: 0,
+          systemMessage: conversation.systemMessage,
+        };
+      }
+
       // Create conversation
-      const conversationId = crypto.randomUUID();
       const conv = await conversationsDb.create(this.db, {
         id: conversationId,
         userId,
         title: conversation.title || 'Imported Conversation',
         model: conversation.model || 'gpt-4o',
         endpoint: conversation.endpoint || 'openai',
+        isArchived: conversation.isArchived ? 1 : 0,
       });
 
       // Create messages
@@ -410,15 +650,32 @@ export class ImportExportService {
       return {
         success: true,
         conversationId: conv.id,
+        title: conversation.title,
         messagesImported,
+        systemMessage: conversation.systemMessage,
       };
     } catch (error) {
       return {
         success: false,
+        title: conversation.title,
         error: error instanceof Error ? error.message : 'Import failed',
         messagesImported: 0,
+        systemMessage: conversation.systemMessage,
       };
     }
+  }
+
+  /**
+   * Simple hash for deduplication
+   */
+  private hashString(str: string): string {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32bit integer
+    }
+    return Math.abs(hash).toString(36);
   }
 
   /**
@@ -431,16 +688,52 @@ export class ImportExportService {
   ): Promise<BulkImportResult> {
     const conversations = this.parseImport(data, format);
     const results: ImportResult[] = [];
+    
+    // Track unique profiles for deduplication
+    const profileMap = new Map<string, ExtractedProfile>();
 
     for (const conv of conversations) {
+      // Extract and deduplicate system message before import
+      const systemMessage = (conv as { systemMessage?: string }).systemMessage;
+      let profileId: string | undefined;
+      
+      if (systemMessage) {
+        profileId = this.hashString(systemMessage);
+        
+        if (!profileMap.has(profileId)) {
+          profileMap.set(profileId, {
+            id: profileId,
+            content: systemMessage,
+            conversationCount: 1,
+            firstSeen: conv.title,
+          });
+        } else {
+          const existing = profileMap.get(profileId)!;
+          existing.conversationCount++;
+        }
+      }
+      
+      // Import conversation (without system message in individual results to save space)
       const result = await this.importConversation(userId, conv);
+      
+      // Replace full system message with just the profile ID reference
+      if (profileId) {
+        result.systemMessage = `profile:${profileId}`;
+      }
+      
       results.push(result);
     }
+
+    // Convert profile map to array, sorted by usage count
+    const uniqueProfiles = Array.from(profileMap.values())
+      .sort((a, b) => b.conversationCount - a.conversationCount);
 
     return {
       total: conversations.length,
       successful: results.filter(r => r.success).length,
       failed: results.filter(r => !r.success).length,
+      withSystemMessage: results.filter(r => r.systemMessage).length,
+      uniqueProfiles,
       results,
     };
   }
@@ -459,8 +752,8 @@ export class ImportExportService {
       throw new Error('Conversation not found');
     }
 
-    // Get messages
-    const messages = await messagesDb.findByConversation(this.db, conversationId);
+    // Get messages (with tenant isolation)
+    const messages = await messagesDb.findByConversation(this.db, conversationId, userId);
 
     const exported: ExportedConversation = {
       id: conversation.id,
@@ -525,7 +818,7 @@ export class ImportExportService {
         const conversation = await conversationsDb.findById(this.db, id);
         if (!conversation || conversation.userId !== userId) continue;
 
-        const messages = await messagesDb.findByConversation(this.db, id);
+        const messages = await messagesDb.findByConversation(this.db, id, userId);
 
         exports.push({
           id: conversation.id,

@@ -524,11 +524,29 @@ export async function exportAllConversations(format: ExportFormat = 'json'): Pro
   return response.blob();
 }
 
-export interface ImportResult {
+export interface ExtractedProfile {
+  id: string;
+  content: string;
+  conversationCount: number;
+  firstSeen?: string;
+}
+
+export interface ImportResultItem {
   success: boolean;
-  conversationsImported: number;
+  conversationId?: string;
+  title?: string;
+  error?: string;
   messagesImported: number;
-  errors: string[];
+  systemMessage?: string;
+}
+
+export interface ImportResult {
+  total: number;
+  successful: number;
+  failed: number;
+  withSystemMessage: number;
+  uniqueProfiles: ExtractedProfile[];
+  results: ImportResultItem[];
 }
 
 export async function importConversations(file: File): Promise<ImportResult> {
@@ -539,6 +557,30 @@ export async function importConversations(file: File): Promise<ImportResult> {
     method: 'POST',
     body: formData,
     credentials: 'include',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: { message: 'Import failed' } }));
+    throw new Error(error.error?.message || 'Failed to import');
+  }
+
+  return response.json();
+}
+
+/**
+ * Import conversations from JSON data directly (for batched imports)
+ * @param data - Array of conversations to import
+ * @param signal - Optional AbortSignal for cancellation
+ */
+export async function importConversationsJson(data: unknown[], signal?: AbortSignal): Promise<ImportResult> {
+  const response = await fetch(`${API_BASE}/data/import`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(data),
+    credentials: 'include',
+    signal,
   });
 
   if (!response.ok) {
@@ -681,5 +723,90 @@ export async function regenerateMessage(
     }
   } finally {
     reader.releaseLock();
+  }
+}
+
+// =============================================================================
+// Encryption Key API (E2EE)
+// =============================================================================
+
+export interface EncryptionKeyResponse {
+  exists: boolean;
+  wrappedKey?: string;
+  keyIv?: string;
+  salt?: string;
+  version?: number;
+}
+
+export interface EncryptionKeyData {
+  wrappedKey: string;
+  keyIv: string;
+  salt: string;
+}
+
+/**
+ * Get the user's wrapped encryption key
+ */
+export async function getEncryptionKey(): Promise<EncryptionKeyResponse> {
+  const response = await fetch(`${API_BASE}/encryption`, {
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to get encryption key');
+  }
+
+  return response.json();
+}
+
+/**
+ * Store a new encryption key for the user
+ */
+export async function createEncryptionKey(data: EncryptionKeyData): Promise<void> {
+  const response = await fetch(`${API_BASE}/encryption`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: { message: 'Failed to store key' } }));
+    throw new Error(error.error?.message || 'Failed to store encryption key');
+  }
+}
+
+/**
+ * Update the encryption key (for password change)
+ */
+export async function updateEncryptionKey(data: EncryptionKeyData): Promise<void> {
+  const response = await fetch(`${API_BASE}/encryption`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: { message: 'Failed to update key' } }));
+    throw new Error(error.error?.message || 'Failed to update encryption key');
+  }
+}
+
+/**
+ * Encrypt a message's stored content (called after receiving AI response)
+ * This replaces the plaintext in the DB with encrypted content
+ */
+export async function encryptMessageContent(messageId: string, encryptedContent: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/messages/${messageId}/encrypt`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ encryptedContent }),
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: { message: 'Failed to encrypt message' } }));
+    throw new Error(error.error?.message || 'Failed to encrypt message');
   }
 }

@@ -278,7 +278,7 @@ export async function processFileUpload(
 /**
  * Get file URL - either public or signed
  */
-export function getFileUrl(
+export async function getFileUrl(
   r2Key: string,
   isPublic: boolean,
   options: {
@@ -287,7 +287,7 @@ export function getFileUrl(
     signedUrlBaseUrl?: string;
     expiresIn?: number;
   }
-): string {
+): Promise<string> {
   if (isPublic) {
     if (!options.publicBaseUrl) {
       throw new Error('Public base URL required for public files');
@@ -301,7 +301,7 @@ export function getFileUrl(
   }
 
   const expiresIn = options.expiresIn ?? 3600; // Default 1 hour
-  return getSignedUrl(
+  return await getSignedUrl(
     null as unknown as R2Bucket, // Not used in getSignedUrl
     r2Key,
     expiresIn,

@@ -5,6 +5,7 @@
 
 import { create } from 'zustand';
 import { authClient } from '../lib/auth-client';
+import { clearMasterKey } from '../lib/encryption';
 import type { User } from '../types';
 
 interface UpdateProfileData {
@@ -122,6 +123,9 @@ export const useAuthStore = create<AuthStore>()((set, get) => ({
     try {
       await authClient.signOut();
     } finally {
+      // Clear encryption master key from memory for security
+      clearMasterKey();
+      
       set({
         user: null,
         isAuthenticated: false,

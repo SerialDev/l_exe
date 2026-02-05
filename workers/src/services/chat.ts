@@ -231,7 +231,7 @@ export class ChatService {
     totalTokens: number;
     summary?: string;
   }> {
-    const dbMessages = await messagesDb.findByConversation(this.db, conversationId);
+    const dbMessages = await messagesDb.findByConversation(this.db, conversationId, this.userId);
     
     // Get conversation for existing summary
     const conversation = await conversationsDb.findById(this.db, conversationId);
@@ -770,7 +770,7 @@ Title (no quotes, no punctuation at end):`;
       title = title.slice(0, 60); // Max 60 chars
       
       if (title) {
-        await conversationsDb.update(this.db, conversationId, { title });
+        await conversationsDb.update(this.db, conversationId, { title }, this.userId);
       }
     } catch (error) {
       // Title generation is non-critical, just log and continue
@@ -917,7 +917,7 @@ Title (no quotes, no punctuation at end):`;
     });
     
     // Update conversation timestamp
-    await conversationsDb.update(this.db, conversationId, {});
+    await conversationsDb.update(this.db, conversationId, {}, this.userId);
     
     // Run background tasks in parallel and AWAIT them before returning response
     // This is critical for Cloudflare Workers - fire-and-forget tasks may be dropped
@@ -1197,7 +1197,7 @@ Title (no quotes, no punctuation at end):`;
         });
         
         // Update conversation timestamp
-        await conversationsDb.update(db, conversationId!, {});
+        await conversationsDb.update(db, conversationId!, {}, self.userId);
         
         // Run background tasks in parallel and AWAIT them before sending done event
         // This is critical for Cloudflare Workers - fire-and-forget tasks may be dropped

@@ -3,15 +3,18 @@
  * Chat interface layout with routing
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useAuthStore } from './stores/authStore';
 import { useChatStore } from './stores/chatStore';
+import { useEncryptionStore } from './stores/encryptionStore';
+import { getEncryptionKey } from './services/api';
 import { Sidebar } from './components/Sidebar/Sidebar';
 import { MessageList } from './components/Chat/MessageList';
 import { ChatInput } from './components/Chat/ChatInput';
 import { ModelSelector } from './components/Chat/ModelSelector';
 import { LoginForm } from './components/Auth/LoginForm';
 import { OAuthCallback } from './components/Auth/OAuthCallback';
+import { EncryptionUnlockModal } from './components/Auth/EncryptionUnlockModal';
 import { SettingsModal } from './components/Settings/SettingsModal';
 import { ImportExportModal } from './components/Settings/ImportExportModal';
 import { Menu, AlertCircle } from 'lucide-react';
@@ -101,7 +104,11 @@ function Router() {
 
 function App() {
   const { isAuthenticated, isLoading, checkAuth } = useAuthStore();
+  const { isEncryptionEnabled } = useEncryptionStore();
   const [currentPath, setCurrentPath] = useState(window.location.pathname);
+  const [showEncryptionModal, setShowEncryptionModal] = useState(false);
+  const [encryptionChecked, setEncryptionChecked] = useState(false);
+  const [skippedEncryption, setSkippedEncryption] = useState(false);
   
   useEffect(() => {
     checkAuth();
@@ -114,6 +121,44 @@ function App() {
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, [checkAuth]);
+
+  // Check if encryption key exists when user is authenticated
+  useEffect(() => {
+    const checkEncryption = async () => {
+      if (isAuthenticated && !encryptionChecked && !isLoading) {
+        try {
+          const keyData = await getEncryptionKey();
+          if (keyData.exists && !isEncryptionEnabled && !skippedEncryption) {
+            setShowEncryptionModal(true);
+          }
+        } catch {
+          // Ignore errors - encryption is optional
+        } finally {
+          setEncryptionChecked(true);
+        }
+      }
+    };
+    
+    checkEncryption();
+  }, [isAuthenticated, encryptionChecked, isLoading, isEncryptionEnabled, skippedEncryption]);
+
+  // Reset encryption check state when user logs out
+  useEffect(() => {
+    if (!isAuthenticated) {
+      setEncryptionChecked(false);
+      setSkippedEncryption(false);
+      setShowEncryptionModal(false);
+    }
+  }, [isAuthenticated]);
+
+  const handleEncryptionUnlocked = useCallback(() => {
+    setShowEncryptionModal(false);
+  }, []);
+
+  const handleEncryptionSkipped = useCallback(() => {
+    setShowEncryptionModal(false);
+    setSkippedEncryption(true);
+  }, []);
 
   // Handle OAuth callback route
   if (currentPath === '/auth/callback') {
@@ -137,7 +182,16 @@ function App() {
     return <LoginForm />;
   }
   
-  return <ChatLayout />;
+  return (
+    <>
+      <ChatLayout />
+      <EncryptionUnlockModal
+        isOpen={showEncryptionModal}
+        onUnlocked={handleEncryptionUnlocked}
+        onSkip={handleEncryptionSkipped}
+      />
+    </>
+  );
 }
 
 export default App;

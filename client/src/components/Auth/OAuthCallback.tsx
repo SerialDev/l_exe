@@ -1,14 +1,26 @@
 /**
  * OAuthCallback Component
- * Handles the OAuth callback for better-auth
+ * Handles the OAuth callback with authorization code exchange
  * 
- * With better-auth, OAuth is handled via cookies, so this page just needs to
- * check the session and redirect. If there's an error, it shows the error message.
+ * SECURITY: The server returns only a short-lived auth code in the URL.
+ * This component exchanges it for actual tokens via a POST request,
+ * preventing tokens from being exposed in URLs/logs.
  */
 
 import { useEffect, useState } from 'react';
 import { useAuthStore } from '../../stores/authStore';
 import { Bot, Loader2, AlertCircle } from 'lucide-react';
+
+// Get API URL
+function getApiUrl(): string {
+  if (import.meta.env.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL;
+  }
+  if (typeof window !== 'undefined' && window.location.hostname.includes('pages.dev')) {
+    return 'https://l-exe.datasloth.workers.dev/api';
+  }
+  return `${window.location.origin}/api`;
+}
 
 export function OAuthCallback() {
   const [error, setError] = useState<string | null>(null);
@@ -25,12 +37,67 @@ export function OAuthCallback() {
         return;
       }
 
-      // With better-auth, OAuth sets a session cookie
-      // We just need to check if we're authenticated
+      // Get the authorization code from URL
+      const code = params.get('code');
+      
+      if (code) {
+        // Exchange the auth code for tokens via POST request
+        // SECURITY: Tokens are returned in response body, not exposed in URL
+        try {
+          const response = await fetch(`${getApiUrl()}/auth/oauth/exchange`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ code }),
+          });
+
+          const data = await response.json();
+
+          if (!response.ok || !data.success) {
+            setError(data.error?.message || 'Failed to exchange authorization code');
+            return;
+          }
+
+          // Store tokens securely
+          if (data.accessToken) {
+            localStorage.setItem('accessToken', data.accessToken);
+          }
+          if (data.refreshToken) {
+            localStorage.setItem('refreshToken', data.refreshToken);
+          }
+        } catch (err) {
+          console.error('OAuth code exchange error:', err);
+          setError('Failed to complete authentication');
+          return;
+        }
+      }
+
+      // Check authentication status
       await checkAuth();
 
       // Get return URL from params or default to home
-      const returnUrl = params.get('returnUrl') || params.get('callbackURL') || '/';
+      // SECURITY: Validate returnUrl to prevent open redirect attacks
+      let returnUrl = params.get('returnUrl') || params.get('callbackURL') || '/';
+      
+      // Only allow relative paths or same-origin URLs
+      try {
+        const url = new URL(returnUrl, window.location.origin);
+        if (url.origin !== window.location.origin) {
+          // External URL - reject and use default
+          console.warn('Rejected external returnUrl:', returnUrl);
+          returnUrl = '/';
+        } else {
+          // Use pathname + search + hash to ensure it's relative
+          returnUrl = url.pathname + url.search + url.hash;
+        }
+      } catch {
+        // Invalid URL - must be a relative path, which is fine
+        // But make sure it starts with / to prevent protocol-relative URLs
+        if (!returnUrl.startsWith('/')) {
+          returnUrl = '/' + returnUrl;
+        }
+      }
 
       // Small delay to ensure state is updated
       setTimeout(() => {

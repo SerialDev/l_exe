@@ -38,6 +38,7 @@ export interface CreateConversationData {
   title?: string;
   endpoint: string;
   model: string;
+  isArchived?: number;
 }
 
 /**
@@ -88,21 +89,21 @@ function rowToConversation(row: ConversationRow): Conversation {
 /**
  * Find a conversation by its unique ID
  * @deprecated Use findByIdForUser instead - this function exists for internal/migration use only
+ * SECURITY: userId is now REQUIRED to prevent tenant isolation bypass
  * @param db - D1 database instance
  * @param id - Conversation ID
- * @param userId - User ID (NOW REQUIRED for tenant isolation)
+ * @param userId - User ID (REQUIRED for tenant isolation)
  * @returns Conversation or null if not found
  */
 export async function findById(db: D1Database, id: string, userId?: string): Promise<Conversation | null> {
+  // SECURITY: If userId is not provided, we must still require tenant isolation
+  // This allows the function to work for migrations/internal use but logs a warning
   if (!userId) {
-    console.warn('[SECURITY] conversations.findById called without userId - use findByIdForUser');
+    console.error('[SECURITY VIOLATION] conversations.findById called without userId - use findByIdForUser');
+    // Return null instead of allowing access to any conversation
+    return null;
   }
-  const query = userId 
-    ? 'SELECT * FROM conversations WHERE id = ? AND user_id = ?'
-    : 'SELECT * FROM conversations WHERE id = ?';
-  const stmt = userId 
-    ? db.prepare(query).bind(id, userId)
-    : db.prepare(query).bind(id);
+  const stmt = db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?').bind(id, userId);
   const result = await stmt.first<ConversationRow>();
   return result ? rowToConversation(result) : null;
 }
@@ -139,7 +140,8 @@ export async function findByUser(
 
   if (options.cursor) {
     // Get the updated_at of the cursor conversation for proper pagination
-    const cursorConvo = await findById(db, options.cursor);
+    // SECURITY: Use findByIdForUser to ensure cursor belongs to this user
+    const cursorConvo = await findByIdForUser(db, options.cursor, userId);
     if (cursorConvo) {
       whereClause += ' AND (updated_at < ? OR (updated_at = ? AND id < ?))';
       values.push(cursorConvo.updatedAt, cursorConvo.updatedAt, options.cursor);
@@ -189,8 +191,8 @@ export async function create(
   const now = new Date().toISOString();
   const stmt = db
     .prepare(
-      `INSERT INTO conversations (id, user_id, title, endpoint, model, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO conversations (id, user_id, title, endpoint, model, is_archived, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       conversation.id,
@@ -198,6 +200,7 @@ export async function create(
       conversation.title ?? 'New Chat',
       conversation.endpoint,
       conversation.model,
+      conversation.isArchived ?? 0,
       now,
       now
     );
@@ -213,20 +216,23 @@ export async function create(
 
 /**
  * Update an existing conversation with ownership check
+ * SECURITY: userId is now REQUIRED to prevent tenant isolation bypass
  * @param db - D1 database instance
  * @param id - Conversation ID
  * @param data - Fields to update
  * @param userId - User ID (REQUIRED for tenant isolation)
  * @returns Updated conversation or null if not found or not owned
+ * @throws Error if userId is not provided
  */
 export async function update(
   db: D1Database,
   id: string,
   data: UpdateConversationData,
-  userId?: string
+  userId: string
 ): Promise<Conversation | null> {
+  // SECURITY: userId is mandatory - throw if not provided
   if (!userId) {
-    console.warn('[SECURITY] conversations.update called without userId - this is a security risk');
+    throw new Error('[SECURITY] conversations.update requires userId for tenant isolation');
   }
   
   const fields: string[] = [];
@@ -246,18 +252,16 @@ export async function update(
   }
 
   if (fields.length === 0) {
-    return findById(db, id, userId);
+    // Just update the timestamp
+    fields.push("updated_at = datetime('now')");
+  } else {
+    fields.push("updated_at = datetime('now')");
   }
-
-  fields.push("updated_at = datetime('now')");
-  values.push(id);
   
-  let query = `UPDATE conversations SET ${fields.join(', ')} WHERE id = ?`;
-  if (userId) {
-    query += ' AND user_id = ?';
-    values.push(userId);
-  }
+  values.push(id);
+  values.push(userId);
 
+  const query = `UPDATE conversations SET ${fields.join(', ')} WHERE id = ? AND user_id = ?`;
   const stmt = db.prepare(query).bind(...values);
 
   const result = await stmt.run();
@@ -265,26 +269,24 @@ export async function update(
     return null;
   }
 
-  return findById(db, id, userId);
+  return findByIdForUser(db, id, userId);
 }
 
 /**
  * Delete a conversation by ID with ownership check
+ * SECURITY: userId is now REQUIRED to prevent tenant isolation bypass
  * @param db - D1 database instance
  * @param id - Conversation ID
  * @param userId - User ID (REQUIRED for tenant isolation)
  * @returns True if deleted, false if not found or not owned
+ * @throws Error if userId is not provided
  */
-export async function deleteConversation(db: D1Database, id: string, userId?: string): Promise<boolean> {
+export async function deleteConversation(db: D1Database, id: string, userId: string): Promise<boolean> {
+  // SECURITY: userId is mandatory - throw if not provided
   if (!userId) {
-    console.warn('[SECURITY] deleteConversation called without userId - this is a security risk');
+    throw new Error('[SECURITY] deleteConversation requires userId for tenant isolation');
   }
-  const query = userId 
-    ? 'DELETE FROM conversations WHERE id = ? AND user_id = ?'
-    : 'DELETE FROM conversations WHERE id = ?';
-  const stmt = userId 
-    ? db.prepare(query).bind(id, userId)
-    : db.prepare(query).bind(id);
+  const stmt = db.prepare('DELETE FROM conversations WHERE id = ? AND user_id = ?').bind(id, userId);
   const result = await stmt.run();
   return result.meta.changes > 0;
 }

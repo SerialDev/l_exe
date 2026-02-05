@@ -7,6 +7,7 @@ import {
   generateRandomBytes,
   bufferToHex,
   generateRandomString,
+  timingSafeEqual,
 } from './crypto';
 
 // Base32 alphabet (RFC 4648)
@@ -135,7 +136,8 @@ export async function generateTOTP(
 }
 
 /**
- * Verify a TOTP token with time window tolerance
+ * Verify a TOTP token with time window tolerance (basic version without replay protection)
+ * NOTE: For production use, prefer verifyTOTPWithReplayProtection which prevents token reuse
  * @param token - The TOTP token to verify
  * @param secret - Base32 encoded secret
  * @param window - Number of time steps to check before/after current (default: 1)
@@ -155,13 +157,18 @@ export async function verifyTOTP(
 
   const currentTime = Date.now();
 
+  // Validate token format - must be digits only
+  if (!/^\d+$/.test(token)) {
+    return false;
+  }
+
   // Check current time step and surrounding windows
   for (let i = -window; i <= window; i++) {
     const checkTime = currentTime + i * timeStep * 1000;
     const expectedToken = await generateTOTP(secret, timeStep, digits, checkTime);
 
-    // Use timing-safe comparison
-    if (timingSafeCompare(token, expectedToken)) {
+    // Use timing-safe comparison from crypto module
+    if (await timingSafeEqual(token, expectedToken)) {
       return true;
     }
   }
@@ -170,18 +177,79 @@ export async function verifyTOTP(
 }
 
 /**
- * Simple timing-safe comparison for TOTP tokens
+ * Verify a TOTP token with replay protection
+ * Prevents the same token from being used twice within its validity window
+ * 
+ * @param token - The TOTP token to verify
+ * @param secret - Base32 encoded secret
+ * @param userId - User ID (for scoping replay protection)
+ * @param kv - KV namespace for storing used tokens
+ * @param window - Number of time steps to check before/after current (default: 1)
+ * @param timeStep - Time step in seconds (default: 30)
+ * @param digits - Number of digits (default: 6)
+ * @returns Object with valid status and matched time step (for debugging)
  */
-function timingSafeCompare(a: string, b: string): boolean {
-  if (a.length !== b.length) {
-    return false;
+export async function verifyTOTPWithReplayProtection(
+  token: string,
+  secret: string,
+  userId: string,
+  kv: KVNamespace,
+  window = 1,
+  timeStep = 30,
+  digits = 6
+): Promise<{ valid: boolean; timeStep?: number }> {
+  if (token.length !== digits) {
+    return { valid: false };
   }
 
-  let result = 0;
-  for (let i = 0; i < a.length; i++) {
-    result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  // Validate token format - must be digits only
+  if (!/^\d+$/.test(token)) {
+    return { valid: false };
   }
-  return result === 0;
+
+  const currentTime = Date.now();
+  const currentTimeStep = Math.floor(currentTime / 1000 / timeStep);
+
+  // Check if this token was already used (check current and adjacent steps)
+  for (let i = -window; i <= window; i++) {
+    const replayKey = `totp:replay:${userId}:${currentTimeStep + i}:${token}`;
+    const used = await kv.get(replayKey);
+    if (used !== null) {
+      // Token already used - reject to prevent replay attack
+      return { valid: false };
+    }
+  }
+
+  // Verify the token
+  let matchedTimeStep: number | undefined;
+  for (let i = -window; i <= window; i++) {
+    const checkTime = currentTime + i * timeStep * 1000;
+    const expectedToken = await generateTOTP(secret, timeStep, digits, checkTime);
+
+    if (await timingSafeEqual(token, expectedToken)) {
+      matchedTimeStep = currentTimeStep + i;
+      break;
+    }
+  }
+
+  if (matchedTimeStep === undefined) {
+    return { valid: false };
+  }
+
+  // Mark token as used - expires after the window period passes
+  // TTL = (window + 1) * timeStep to ensure it covers the full validity window
+  const ttl = (window + 1) * timeStep;
+  const replayKey = `totp:replay:${userId}:${matchedTimeStep}:${token}`;
+  
+  try {
+    await kv.put(replayKey, '1', { expirationTtl: ttl });
+  } catch (error) {
+    // If we can't store the replay marker, fail secure (reject the token)
+    console.error('Failed to store TOTP replay marker:', error);
+    return { valid: false };
+  }
+
+  return { valid: true, timeStep: matchedTimeStep };
 }
 
 /**
@@ -243,6 +311,8 @@ export async function hashBackupCodes(codes: string[]): Promise<string[]> {
 
 /**
  * Verify a backup code against stored hashes
+ * SECURITY: Uses constant-time comparison and iterates through ALL codes
+ * to prevent timing attacks that could reveal code position
  */
 export async function verifyBackupCode(
   code: string,
@@ -254,11 +324,18 @@ export async function verifyBackupCode(
   const hash = await crypto.subtle.digest('SHA-256', encoder.encode(cleanCode));
   const codeHash = bufferToHex(hash);
 
+  // SECURITY: Always iterate through ALL codes to prevent timing attacks
+  let foundIndex = -1;
+  let isValid = false;
+
   for (let i = 0; i < hashedCodes.length; i++) {
-    if (timingSafeCompare(codeHash, hashedCodes[i])) {
-      return { valid: true, index: i };
+    const matches = await timingSafeEqual(codeHash, hashedCodes[i]);
+    // Use bitwise operations to avoid branching that could leak timing info
+    if (matches) {
+      foundIndex = i;
+      isValid = true;
     }
   }
 
-  return { valid: false, index: -1 };
+  return { valid: isValid, index: foundIndex };
 }

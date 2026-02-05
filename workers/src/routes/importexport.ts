@@ -30,37 +30,78 @@ app.use('*', async (c, next) => {
  * Import conversations from various formats
  */
 app.post('/import', async (c) => {
-  const userId = c.get('userId');
-  const contentType = c.req.header('content-type') || '';
-  
-  let data: unknown;
-  let format = c.req.query('format') as ImportFormat | undefined;
-
-  if (contentType.includes('multipart/form-data')) {
-    const formData = await c.req.formData();
-    const fileEntry = formData.get('file');
+  try {
+    const userId = c.get('userId');
+    console.log('[Import] Starting import for user:', userId);
     
-    if (!fileEntry || typeof fileEntry === 'string') {
-      throw new HTTPException(400, { message: 'File is required' });
+    const contentType = c.req.header('content-type') || '';
+    console.log('[Import] Content-Type:', contentType);
+    
+    let data: unknown;
+    let format = c.req.query('format') as ImportFormat | undefined;
+
+    if (contentType.includes('multipart/form-data')) {
+      console.log('[Import] Processing multipart form data');
+      const formData = await c.req.formData();
+      const fileEntry = formData.get('file');
+      
+      if (!fileEntry || typeof fileEntry === 'string') {
+        throw new HTTPException(400, { message: 'File is required' });
+      }
+
+      const file = fileEntry as File;
+      console.log('[Import] File received:', file.name, 'size:', file.size);
+      
+      // Check file size (max 50MB to leave room for processing)
+      if (file.size > 50 * 1024 * 1024) {
+        throw new HTTPException(400, { 
+          message: `File too large (${Math.round(file.size / 1024 / 1024)}MB). Maximum is 50MB. Please split into smaller batches.` 
+        });
+      }
+      
+      const text = await file.text();
+      console.log('[Import] File text length:', text.length);
+      
+      try {
+        data = JSON.parse(text);
+        console.log('[Import] JSON parsed successfully, isArray:', Array.isArray(data));
+      } catch (e) {
+        throw new HTTPException(400, { message: 'Invalid JSON file: ' + (e instanceof Error ? e.message : 'parse error') });
+      }
+
+      format = (formData.get('format') as ImportFormat) || format;
+    } else {
+      console.log('[Import] Processing JSON body');
+      data = await c.req.json();
+      console.log('[Import] JSON body parsed, isArray:', Array.isArray(data));
     }
 
-    const file = fileEntry as File;
-    const text = await file.text();
-    try {
-      data = JSON.parse(text);
-    } catch {
-      throw new HTTPException(400, { message: 'Invalid JSON file' });
+    // Check array size for bulk imports
+    const itemCount = Array.isArray(data) ? data.length : 1;
+    console.log('[Import] Item count:', itemCount);
+    
+    if (itemCount > 500) {
+      throw new HTTPException(400, { 
+        message: `Too many conversations (${itemCount}). Maximum is 500 per import. Please split into smaller batches.` 
+      });
     }
 
-    format = (formData.get('format') as ImportFormat) || format;
-  } else {
-    data = await c.req.json();
+    console.log('[Import] Creating service and starting bulk import');
+    const service = createImportExportService(c.env.DB);
+    const result = await service.importBulk(userId, data, format);
+    
+    console.log('[Import] Import complete:', result.successful, 'successful,', result.failed, 'failed');
+
+    return c.json(result);
+  } catch (error) {
+    console.error('[Import] Error:', error);
+    if (error instanceof HTTPException) {
+      throw error;
+    }
+    throw new HTTPException(500, { 
+      message: 'Import failed: ' + (error instanceof Error ? error.message : 'Unknown error') 
+    });
   }
-
-  const service = createImportExportService(c.env.DB);
-  const result = await service.importBulk(userId, data, format);
-
-  return c.json(result);
 });
 
 /**

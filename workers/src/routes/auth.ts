@@ -47,11 +47,15 @@ import {
   storeOAuthState,
   verifyOAuthState,
   findOrCreateOAuthUser,
+  generateAuthCode,
+  storeAuthCode,
+  exchangeAuthCode,
 } from '../services/oauth';
 import {
   generateSecret,
   generateTOTP,
   verifyTOTP,
+  verifyTOTPWithReplayProtection,
   generateBackupCodes,
   hashBackupCodes,
   verifyBackupCode,
@@ -64,6 +68,7 @@ import {
   sendPasswordResetEmail,
   type EmailConfig,
 } from '../services/email';
+import { createRateLimiter } from '../middleware/rateLimit';
 
 // Types for Cloudflare bindings
 interface Env {
@@ -97,6 +102,19 @@ const WEAK_PASSWORDS = new Set([
   'ashley', 'bailey', 'shadow', '123123', '654321', 'superman', 'qazwsx',
   'michael', 'football', 'password1', 'password123', 'batman', 'login', 'admin',
 ]);
+
+/**
+ * SECURITY: Strict rate limiter for 2FA verification
+ * 5 attempts per 15 minutes to prevent brute force on 6-digit TOTP codes
+ * With 6 digits there are 1,000,000 possible codes, and TOTP codes are valid for 30 seconds
+ * This limit ensures an attacker cannot try more than ~20 codes per hour
+ */
+const twoFactorRateLimiter = createRateLimiter({
+  limit: 5,
+  window: 900, // 15 minutes
+  keyPrefix: '2fa-verify',
+  kvNamespace: 'SESSIONS',
+});
 
 // Password strength validation
 const passwordSchema = z.string()
@@ -662,15 +680,20 @@ auth.get('/google/callback', async (c) => {
     // Create session
     await createSession(c.env.DB, user.id, refreshToken);
 
-    // Redirect back to client with tokens
-    const returnUrl = stateData.returnUrl || '/';
-    const params = new URLSearchParams({
+    // SECURITY: Use authorization code pattern instead of passing tokens in URL
+    // Generate a short-lived auth code that the client will exchange via POST
+    const authCode = generateAuthCode();
+    await storeAuthCode(c.env.SESSIONS, authCode, {
+      userId: user.id,
       accessToken,
       refreshToken,
-      expiresIn: '900',
+      expiresIn: 900,
+      returnUrl: stateData.returnUrl,
     });
 
-    return c.redirect(`${c.env.DOMAIN_CLIENT}/auth/callback?${params.toString()}&returnUrl=${encodeURIComponent(returnUrl)}`);
+    // Redirect back to client with only the auth code (not the actual tokens)
+    const returnUrl = stateData.returnUrl || '/';
+    return c.redirect(`${c.env.DOMAIN_CLIENT}/auth/callback?code=${authCode}&returnUrl=${encodeURIComponent(returnUrl)}`);
   } catch (error) {
     console.error('Google OAuth callback error:', error);
     return c.redirect(`${c.env.DOMAIN_CLIENT}/login?error=oauth_failed`);
@@ -771,15 +794,19 @@ auth.get('/github/callback', async (c) => {
     // Create session
     await createSession(c.env.DB, user.id, refreshToken);
 
-    // Redirect back to client with tokens
-    const returnUrl = stateData.returnUrl || '/';
-    const params = new URLSearchParams({
+    // SECURITY: Use authorization code pattern instead of passing tokens in URL
+    const authCode = generateAuthCode();
+    await storeAuthCode(c.env.SESSIONS, authCode, {
+      userId: user.id,
       accessToken,
       refreshToken,
-      expiresIn: '900',
+      expiresIn: 900,
+      returnUrl: stateData.returnUrl,
     });
 
-    return c.redirect(`${c.env.DOMAIN_CLIENT}/auth/callback?${params.toString()}&returnUrl=${encodeURIComponent(returnUrl)}`);
+    // Redirect back to client with only the auth code
+    const returnUrl = stateData.returnUrl || '/';
+    return c.redirect(`${c.env.DOMAIN_CLIENT}/auth/callback?code=${authCode}&returnUrl=${encodeURIComponent(returnUrl)}`);
   } catch (error) {
     console.error('GitHub OAuth callback error:', error);
     return c.redirect(`${c.env.DOMAIN_CLIENT}/login?error=oauth_failed`);
@@ -880,18 +907,68 @@ auth.get('/discord/callback', async (c) => {
     // Create session
     await createSession(c.env.DB, user.id, refreshToken);
 
-    // Redirect back to client with tokens
-    const returnUrl = stateData.returnUrl || '/';
-    const params = new URLSearchParams({
+    // SECURITY: Use authorization code pattern instead of passing tokens in URL
+    const authCode = generateAuthCode();
+    await storeAuthCode(c.env.SESSIONS, authCode, {
+      userId: user.id,
       accessToken,
       refreshToken,
-      expiresIn: '900',
+      expiresIn: 900,
+      returnUrl: stateData.returnUrl,
     });
 
-    return c.redirect(`${c.env.DOMAIN_CLIENT}/auth/callback?${params.toString()}&returnUrl=${encodeURIComponent(returnUrl)}`);
+    // Redirect back to client with only the auth code
+    const returnUrl = stateData.returnUrl || '/';
+    return c.redirect(`${c.env.DOMAIN_CLIENT}/auth/callback?code=${authCode}&returnUrl=${encodeURIComponent(returnUrl)}`);
   } catch (error) {
     console.error('Discord OAuth callback error:', error);
     return c.redirect(`${c.env.DOMAIN_CLIENT}/login?error=oauth_failed`);
+  }
+});
+
+// =============================================================================
+// OAuth Authorization Code Exchange
+// =============================================================================
+
+/**
+ * POST /oauth/exchange
+ * Exchange an authorization code for tokens
+ * SECURITY: This endpoint receives the auth code and returns actual tokens via POST body
+ */
+auth.post('/oauth/exchange', async (c) => {
+  try {
+    const body = await c.req.json() as { code?: string };
+    const { code } = body;
+
+    if (!code) {
+      return c.json({
+        success: false,
+        error: { message: 'Authorization code is required' },
+      }, 400);
+    }
+
+    // Exchange code for tokens (one-time use)
+    const tokenData = await exchangeAuthCode(c.env.SESSIONS, code);
+
+    if (!tokenData) {
+      return c.json({
+        success: false,
+        error: { message: 'Invalid or expired authorization code' },
+      }, 400);
+    }
+
+    return c.json({
+      success: true,
+      accessToken: tokenData.accessToken,
+      refreshToken: tokenData.refreshToken,
+      expiresIn: tokenData.expiresIn,
+    });
+  } catch (error) {
+    console.error('OAuth code exchange error:', error);
+    return c.json({
+      success: false,
+      error: { message: 'Failed to exchange authorization code' },
+    }, 500);
   }
 });
 
@@ -1039,8 +1116,9 @@ auth.get('/2fa/enable', async (c) => {
 /**
  * POST /2fa/verify
  * Verify TOTP token during 2FA setup (before confirming)
+ * SECURITY: Rate limited to 5 attempts per 15 minutes to prevent brute force
  */
-auth.post('/2fa/verify', zValidator('json', verify2FASchema), async (c) => {
+auth.post('/2fa/verify', twoFactorRateLimiter, zValidator('json', verify2FASchema), async (c) => {
   const authHeader = c.req.header('Authorization');
   if (!authHeader?.startsWith('Bearer ')) {
     return c.json({ success: false, error: { message: 'Unauthorized' } }, 401);
@@ -1082,8 +1160,9 @@ auth.post('/2fa/verify', zValidator('json', verify2FASchema), async (c) => {
 /**
  * POST /2fa/confirm
  * Confirm and enable 2FA (final step)
+ * SECURITY: Rate limited to 5 attempts per 15 minutes to prevent brute force
  */
-auth.post('/2fa/confirm', zValidator('json', verify2FASchema), async (c) => {
+auth.post('/2fa/confirm', twoFactorRateLimiter, zValidator('json', verify2FASchema), async (c) => {
   const authHeader = c.req.header('Authorization');
   if (!authHeader?.startsWith('Bearer ')) {
     return c.json({ success: false, error: { message: 'Unauthorized' } }, 401);
@@ -1109,12 +1188,19 @@ auth.post('/2fa/confirm', zValidator('json', verify2FASchema), async (c) => {
       }, 400);
     }
 
-    // Verify the token
-    const isValid = await verifyTOTP(token, secret);
-    if (!isValid) {
+    // Verify the token with replay protection
+    // Use setup-specific userId key to prevent replay during setup
+    const setupReplayKey = `setup:${payload.sub}`;
+    const result = await verifyTOTPWithReplayProtection(
+      token, 
+      secret, 
+      setupReplayKey, 
+      c.env.SESSIONS
+    );
+    if (!result.valid) {
       return c.json({
         success: false,
-        error: { message: 'Invalid verification code' },
+        error: { message: 'Invalid or already used verification code' },
       }, 400);
     }
 
@@ -1203,12 +1289,17 @@ auth.post('/2fa/disable', zValidator('json', disable2FASchema), async (c) => {
       }
     }
 
-    // Verify the TOTP token
-    const isValid = await verifyTOTP(token, user.two_factor_secret);
-    if (!isValid) {
+    // Verify the TOTP token with replay protection
+    const result = await verifyTOTPWithReplayProtection(
+      token, 
+      user.two_factor_secret, 
+      payload.sub, 
+      c.env.SESSIONS
+    );
+    if (!result.valid) {
       return c.json({
         success: false,
-        error: { message: 'Invalid verification code' },
+        error: { message: 'Invalid or already used verification code' },
       }, 400);
     }
 
@@ -1277,12 +1368,17 @@ auth.post('/2fa/backup/regenerate', zValidator('json', verify2FASchema), async (
       }, 400);
     }
 
-    // Verify the TOTP token
-    const isValid = await verifyTOTP(token, user.two_factor_secret);
-    if (!isValid) {
+    // Verify the TOTP token with replay protection
+    const result = await verifyTOTPWithReplayProtection(
+      token, 
+      user.two_factor_secret, 
+      payload.sub, 
+      c.env.SESSIONS
+    );
+    if (!result.valid) {
       return c.json({
         success: false,
-        error: { message: 'Invalid verification code' },
+        error: { message: 'Invalid or already used verification code' },
       }, 400);
     }
 
@@ -1312,8 +1408,9 @@ auth.post('/2fa/backup/regenerate', zValidator('json', verify2FASchema), async (
 /**
  * POST /2fa/verify-temp
  * Verify 2FA during login (with temp token)
+ * SECURITY: Rate limited to 5 attempts per 15 minutes to prevent brute force
  */
-auth.post('/2fa/verify-temp', zValidator('json', z.object({
+auth.post('/2fa/verify-temp', twoFactorRateLimiter, zValidator('json', z.object({
   tempToken: z.string(),
   token: z.string().length(6).optional(),
   backupCode: z.string().optional(),
@@ -1355,11 +1452,17 @@ auth.post('/2fa/verify-temp', zValidator('json', z.object({
 
     let verified = false;
 
-    // Verify TOTP token
+    // Verify TOTP token with replay protection
     if (data.token) {
-      verified = await verifyTOTP(data.token, user.two_factor_secret);
+      const result = await verifyTOTPWithReplayProtection(
+        data.token, 
+        user.two_factor_secret, 
+        userId, 
+        c.env.SESSIONS
+      );
+      verified = result.valid;
     }
-    // Or verify backup code
+    // Or verify backup code (already has single-use protection via database)
     else if (data.backupCode && user.backup_codes) {
       const hashedCodes: string[] = JSON.parse(user.backup_codes);
       const result = await verifyBackupCode(data.backupCode, hashedCodes);

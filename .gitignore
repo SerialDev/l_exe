@@ -35,3 +35,4 @@ worker-configuration.d.ts
 *.sqlite
 *.sqlite3
 .mf/
+data_example/

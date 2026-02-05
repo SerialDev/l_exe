@@ -4,34 +4,74 @@
  * This endpoint runs the database migrations for better-auth tables.
  * Should only be called once during initial setup.
  * 
- * Security: In production, this should be protected or removed after initial setup.
+ * SECURITY: These endpoints are protected and require either:
+ * 1. Correct MIGRATION_SECRET header (in production), OR
+ * 2. Development environment (localhost)
  */
 
 import { Hono } from 'hono';
+import type { Context, Next } from 'hono';
 import { getMigrations } from 'better-auth/db';
 import { Kysely } from 'kysely';
 import { D1Dialect } from 'kysely-d1';
 import type { Env } from '../types';
+import { timingSafeEqual } from '../services/crypto';
 
 const migrate = new Hono<{ Bindings: Env }>();
+
+/**
+ * SECURITY: Migration authorization middleware
+ * Requires correct MIGRATION_SECRET header in production
+ */
+async function requireMigrationAuth(c: Context<{ Bindings: Env }>, next: Next) {
+  const isLocalhost = c.env.DOMAIN_SERVER?.includes('localhost') === true ||
+                      c.env.ENVIRONMENT === 'development';
+  
+  // In development/localhost, allow without auth for initial setup
+  if (isLocalhost) {
+    return next();
+  }
+  
+  // In production, require migration secret header
+  const migrationSecret = c.req.header('X-Migration-Secret');
+  const expectedSecret = c.env.MIGRATION_SECRET;
+  
+  // SECURITY: Migration secret must be configured in production
+  if (!expectedSecret || expectedSecret.length < 32) {
+    console.error('MIGRATION_SECRET not configured or too short');
+    return c.json({ 
+      success: false, 
+      error: 'Migration not configured for this environment' 
+    }, 503);
+  }
+  
+  // SECURITY: Use timing-safe comparison
+  if (!migrationSecret || migrationSecret.length !== expectedSecret.length) {
+    return c.json({ 
+      success: false, 
+      error: 'Unauthorized' 
+    }, 401);
+  }
+  
+  const secretsMatch = await timingSafeEqual(migrationSecret, expectedSecret);
+  if (!secretsMatch) {
+    return c.json({ 
+      success: false, 
+      error: 'Unauthorized' 
+    }, 401);
+  }
+  
+  return next();
+}
+
+// Apply migration auth to all routes
+migrate.use('*', requireMigrationAuth);
 
 /**
  * POST /migrate
  * Run better-auth database migrations
  */
 migrate.post('/', async (c) => {
-  // Simple protection - require a secret header in production
-  const migrationSecret = c.req.header('X-Migration-Secret');
-  if (c.env.DOMAIN_SERVER?.includes('localhost') === false) {
-    // In production, require a secret
-    if (migrationSecret !== c.env.JWT_SECRET?.substring(0, 16)) {
-      return c.json({ 
-        success: false, 
-        error: 'Unauthorized' 
-      }, 401);
-    }
-  }
-
   try {
     // Create Kysely instance with D1 dialect
     const db = new Kysely<any>({

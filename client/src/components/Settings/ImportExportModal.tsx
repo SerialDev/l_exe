@@ -32,6 +32,17 @@ const formatOptions: { value: ExportFormat; label: string; icon: React.ReactNode
   { value: 'html', label: 'HTML', icon: <FileCode className="w-5 h-5" />, description: 'Web page format' },
 ];
 
+// Batch size for large imports
+const BATCH_SIZE = 50;
+
+interface ImportProgress {
+  currentBatch: number;
+  totalBatches: number;
+  processedConversations: number;
+  totalConversations: number;
+  status: 'parsing' | 'importing' | 'done' | 'error';
+}
+
 export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
   const [activeTab, setActiveTab] = useState<'export' | 'import'>('export');
   const [exportFormat, setExportFormat] = useState<ExportFormat>('json');
@@ -40,7 +51,9 @@ export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
   const [isImporting, setIsImporting] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [importResult, setImportResult] = useState<api.ImportResult | null>(null);
+  const [importProgress, setImportProgress] = useState<ImportProgress | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const { currentConversation, loadConversations } = useChatStore();
 
@@ -84,32 +97,156 @@ export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    // Create new AbortController for this import
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+
     setIsImporting(true);
     setMessage(null);
     setImportResult(null);
+    setImportProgress({ currentBatch: 0, totalBatches: 0, processedConversations: 0, totalConversations: 0, status: 'parsing' });
 
     try {
-      const result = await api.importConversations(file);
-      setImportResult(result);
+      // Parse the JSON file locally first
+      const text = await file.text();
+      let data: unknown[];
       
-      if (result.success) {
-        setMessage({ 
-          type: 'success', 
-          text: `Imported ${result.conversationsImported} conversations with ${result.messagesImported} messages` 
-        });
+      try {
+        const parsed = JSON.parse(text);
+        // Normalize to array
+        data = Array.isArray(parsed) ? parsed : [parsed];
+      } catch {
+        throw new Error('Invalid JSON file');
+      }
+
+      const totalConversations = data.length;
+      const totalBatches = Math.ceil(totalConversations / BATCH_SIZE);
+      
+      setImportProgress({
+        currentBatch: 0,
+        totalBatches,
+        processedConversations: 0,
+        totalConversations,
+        status: 'importing'
+      });
+
+      // Aggregate results across all batches
+      const aggregatedResult: api.ImportResult = {
+        total: 0,
+        successful: 0,
+        failed: 0,
+        withSystemMessage: 0,
+        uniqueProfiles: [],
+        results: []
+      };
+
+      // Process in batches
+      for (let i = 0; i < totalBatches; i++) {
+        // Check if cancelled
+        if (abortController.signal.aborted) {
+          setMessage({ type: 'error', text: `Import cancelled after ${aggregatedResult.successful} conversations` });
+          break;
+        }
+
+        const start = i * BATCH_SIZE;
+        const end = Math.min(start + BATCH_SIZE, totalConversations);
+        const batch = data.slice(start, end);
+
+        setImportProgress(prev => prev ? {
+          ...prev,
+          currentBatch: i + 1,
+          status: 'importing'
+        } : null);
+
+        // Send batch as JSON directly (not as file upload)
+        try {
+          const result = await api.importConversationsJson(batch, abortController.signal);
+          
+          // Aggregate results
+          aggregatedResult.total += result.total;
+          aggregatedResult.successful += result.successful;
+          aggregatedResult.failed += result.failed;
+          aggregatedResult.withSystemMessage += result.withSystemMessage;
+          if (result.results) {
+            aggregatedResult.results.push(...result.results);
+          }
+          
+          // Merge unique profiles (deduplicate by id)
+          if (result.uniqueProfiles) {
+            for (const profile of result.uniqueProfiles) {
+              const existing = aggregatedResult.uniqueProfiles.find(p => p.id === profile.id);
+              if (existing) {
+                existing.conversationCount += profile.conversationCount;
+              } else {
+                aggregatedResult.uniqueProfiles.push({ ...profile });
+              }
+            }
+          }
+        } catch (error) {
+          console.error(`Batch ${i + 1} failed:`, error);
+          // Continue with next batch, count these as failed
+          aggregatedResult.total += batch.length;
+          aggregatedResult.failed += batch.length;
+        }
+
+        setImportProgress(prev => prev ? {
+          ...prev,
+          processedConversations: end
+        } : null);
+
+        // Small delay between batches to avoid overwhelming the server
+        if (i < totalBatches - 1) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
+
+      // Sort profiles by conversation count
+      aggregatedResult.uniqueProfiles.sort((a, b) => b.conversationCount - a.conversationCount);
+
+      setImportResult(aggregatedResult);
+      setImportProgress(prev => prev ? { ...prev, status: 'done' } : null);
+      
+      // Count skipped (already imported) vs actual errors
+      const skipped = aggregatedResult.results?.filter(r => r.error === 'Conversation already imported').length ?? 0;
+      const actualErrors = aggregatedResult.failed - skipped;
+      
+      if (aggregatedResult.successful > 0) {
+        const totalMessages = aggregatedResult.results?.reduce((sum, r) => sum + r.messagesImported, 0) ?? 0;
+        let text = `Imported ${aggregatedResult.successful} conversations with ${totalMessages} messages`;
+        if (skipped > 0) {
+          text += ` (${skipped} already existed)`;
+        }
+        setMessage({ type: 'success', text });
         // Refresh conversation list
         loadConversations();
-      } else {
-        setMessage({ type: 'error', text: result.errors.join(', ') || 'Import failed' });
+      } else if (skipped > 0 && actualErrors === 0) {
+        // All were skipped (duplicates)
+        setMessage({ type: 'success', text: `All ${skipped} conversations were already imported` });
+      } else if (actualErrors > 0) {
+        const errors = aggregatedResult.results?.filter(r => r.error && r.error !== 'Conversation already imported').map(r => r.error) ?? [];
+        setMessage({ type: 'error', text: errors.slice(0, 3).join(', ') || 'Import failed' });
       }
     } catch (error) {
+      // Don't show error if it was just cancelled
+      if (error instanceof Error && error.name === 'AbortError') {
+        return;
+      }
+      setImportProgress(prev => prev ? { ...prev, status: 'error' } : null);
       setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Import failed' });
     } finally {
       setIsImporting(false);
+      abortControllerRef.current = null;
       // Reset file input
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
       }
+    }
+  };
+
+  const handleCancelImport = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      setMessage({ type: 'error', text: 'Cancelling...' });
     }
   };
 
@@ -280,37 +417,124 @@ export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
                 className="hidden"
               />
 
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                disabled={isImporting}
-                className="w-full py-8 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg hover:border-green-500 dark:hover:border-green-500 transition-colors flex flex-col items-center gap-2 text-gray-600 dark:text-gray-400 hover:text-green-600 dark:hover:text-green-400"
-              >
-                {isImporting ? (
-                  <>
-                    <Loader2 className="w-8 h-8 animate-spin" />
-                    <span>Importing...</span>
-                  </>
-                ) : (
-                  <>
-                    <Upload className="w-8 h-8" />
-                    <span>Click to select a JSON file</span>
-                    <span className="text-xs">or drag and drop</span>
-                  </>
-                )}
-              </button>
-
-              {importResult && (
-                <div className="p-4 bg-gray-100 dark:bg-gray-700 rounded-lg">
-                  <h4 className="font-medium text-gray-900 dark:text-white mb-2">Import Summary</h4>
-                  <ul className="text-sm text-gray-600 dark:text-gray-400 space-y-1">
-                    <li>Conversations: {importResult.conversationsImported}</li>
-                    <li>Messages: {importResult.messagesImported}</li>
-                    {importResult.errors.length > 0 && (
-                      <li className="text-red-500">Errors: {importResult.errors.length}</li>
-                    )}
-                  </ul>
+              {/* Progress indicator during import */}
+              {isImporting && importProgress && (
+                <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="w-5 h-5 animate-spin text-blue-600" />
+                      <span className="font-medium text-blue-700 dark:text-blue-400">
+                        {importProgress.status === 'parsing' ? 'Parsing file...' : 
+                         importProgress.status === 'importing' ? `Importing batch ${importProgress.currentBatch} of ${importProgress.totalBatches}...` :
+                         'Done!'}
+                      </span>
+                    </div>
+                    <button
+                      onClick={handleCancelImport}
+                      className="text-sm text-red-600 hover:text-red-700 dark:text-red-400"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  
+                  {/* Progress bar */}
+                  <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+                    <div 
+                      className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                      style={{ 
+                        width: `${importProgress.totalConversations > 0 
+                          ? (importProgress.processedConversations / importProgress.totalConversations) * 100 
+                          : 0}%` 
+                      }}
+                    />
+                  </div>
+                  
+                  <div className="text-sm text-gray-600 dark:text-gray-400">
+                    {importProgress.processedConversations} / {importProgress.totalConversations} conversations processed
+                  </div>
                 </div>
               )}
+
+              {/* File upload button */}
+              {!isImporting && (
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isImporting}
+                  className="w-full py-8 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg hover:border-green-500 dark:hover:border-green-500 transition-colors flex flex-col items-center gap-2 text-gray-600 dark:text-gray-400 hover:text-green-600 dark:hover:text-green-400"
+                >
+                  <Upload className="w-8 h-8" />
+                  <span>Click to select a JSON file</span>
+                  <span className="text-xs">Large files will be automatically batched</span>
+                </button>
+              )}
+
+              {importResult && (() => {
+                const skipped = importResult.results?.filter(r => r.error === 'Conversation already imported').length ?? 0;
+                const actualErrors = importResult.failed - skipped;
+                
+                return (
+                <div className="p-4 bg-gray-100 dark:bg-gray-700 rounded-lg space-y-3">
+                  <h4 className="font-medium text-gray-900 dark:text-white">Import Summary</h4>
+                  <ul className="text-sm text-gray-600 dark:text-gray-400 space-y-1">
+                    <li className="flex justify-between">
+                      <span>Total conversations:</span>
+                      <span className="font-medium">{importResult.total}</span>
+                    </li>
+                    <li className="flex justify-between text-green-600 dark:text-green-400">
+                      <span>New imports:</span>
+                      <span className="font-medium">{importResult.successful}</span>
+                    </li>
+                    {skipped > 0 && (
+                      <li className="flex justify-between text-yellow-600 dark:text-yellow-400">
+                        <span>Already existed:</span>
+                        <span className="font-medium">{skipped}</span>
+                      </li>
+                    )}
+                    {actualErrors > 0 && (
+                      <li className="flex justify-between text-red-500">
+                        <span>Failed:</span>
+                        <span className="font-medium">{actualErrors}</span>
+                      </li>
+                    )}
+                    <li className="flex justify-between">
+                      <span>Total messages:</span>
+                      <span className="font-medium">
+                        {importResult.results?.reduce((sum, r) => sum + r.messagesImported, 0) ?? 0}
+                      </span>
+                    </li>
+                  </ul>
+                  
+                  {/* Unique Profiles Section */}
+                  {importResult.uniqueProfiles && importResult.uniqueProfiles.length > 0 && (
+                    <div className="pt-3 border-t border-gray-200 dark:border-gray-600">
+                      <h5 className="text-sm font-medium text-gray-900 dark:text-white mb-2">
+                        Extracted Custom Instructions ({importResult.uniqueProfiles.length} unique)
+                      </h5>
+                      <div className="space-y-2 max-h-32 overflow-y-auto">
+                        {importResult.uniqueProfiles.map((profile) => (
+                          <div 
+                            key={profile.id}
+                            className="text-xs p-2 bg-gray-200 dark:bg-gray-600 rounded"
+                          >
+                            <div className="flex justify-between items-center mb-1">
+                              <span className="font-medium text-gray-700 dark:text-gray-300">
+                                Profile #{profile.id}
+                              </span>
+                              <span className="text-gray-500 dark:text-gray-400">
+                                {profile.conversationCount} conversations
+                              </span>
+                            </div>
+                            <p className="text-gray-600 dark:text-gray-400 line-clamp-2">
+                              {profile.content.substring(0, 150)}...
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+                );
+              })()}
 
               <div className="text-xs text-gray-500 dark:text-gray-400">
                 <strong>Supported formats:</strong>

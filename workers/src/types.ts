@@ -33,6 +33,7 @@ export interface Env {
   APP_TITLE: string;
   DOMAIN_SERVER: string;
   DOMAIN_CLIENT: string;
+  ENVIRONMENT?: string;  // 'development' | 'production' | 'staging'
   
   // Auth settings (secrets - set via wrangler secret put)
   JWT_SECRET: string;
@@ -105,6 +106,9 @@ export interface Env {
   // Rate limiting config
   RATE_LIMIT_WINDOW_MS?: string;
   RATE_LIMIT_MAX_REQUESTS?: string;
+  
+  // Migration security (required in production)
+  MIGRATION_SECRET?: string;
   
   // File upload limits
   MAX_FILE_SIZE?: string;

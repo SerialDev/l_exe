@@ -1,9 +1,11 @@
 /**
  * OAuth Service
  * Handles Google, GitHub, and Discord OAuth authentication flows
+ * 
+ * SECURITY: Uses authorization code pattern to avoid exposing tokens in URLs
  */
 
-import { generateUUID } from './crypto';
+import { generateUUID, generateRandomString } from './crypto';
 
 // =============================================================================
 // Types
@@ -519,4 +521,77 @@ export async function getDiscordUserInfo(accessToken: string): Promise<DiscordUs
   }
 
   return response.json();
+}
+
+// =============================================================================
+// Authorization Code for Token Exchange
+// SECURITY: Prevents tokens from being exposed in URL query parameters
+// =============================================================================
+
+export interface AuthCodeData {
+  userId: string;
+  accessToken: string;
+  refreshToken: string;
+  expiresIn: number;
+  returnUrl?: string;
+}
+
+/**
+ * Generate a short-lived authorization code
+ * The client will exchange this for actual tokens via POST request
+ */
+export function generateAuthCode(): string {
+  // 64 alphanumeric characters ≈ 380 bits of entropy
+  return generateRandomString(64);
+}
+
+/**
+ * Store authorization code in KV with associated token data
+ * @param kv - KV namespace
+ * @param code - The authorization code
+ * @param data - Token data to store
+ */
+export async function storeAuthCode(
+  kv: KVNamespace,
+  code: string,
+  data: AuthCodeData
+): Promise<void> {
+  // Very short TTL (60 seconds) - code should be exchanged immediately
+  await kv.put(
+    `auth_code:${code}`,
+    JSON.stringify(data),
+    { expirationTtl: 60 }
+  );
+}
+
+/**
+ * Exchange authorization code for tokens (one-time use)
+ * @param kv - KV namespace
+ * @param code - The authorization code to exchange
+ * @returns Token data or null if code is invalid/expired
+ */
+export async function exchangeAuthCode(
+  kv: KVNamespace,
+  code: string
+): Promise<AuthCodeData | null> {
+  // Validate code format
+  if (!code || code.length !== 64 || !/^[A-Za-z0-9]+$/.test(code)) {
+    return null;
+  }
+
+  const key = `auth_code:${code}`;
+  const data = await kv.get(key);
+  
+  if (!data) {
+    return null;
+  }
+
+  // Delete immediately (one-time use)
+  await kv.delete(key);
+  
+  try {
+    return JSON.parse(data) as AuthCodeData;
+  } catch {
+    return null;
+  }
 }

@@ -69,9 +69,16 @@ function base64UrlDecode(str: string): string {
 
 /**
  * Verify JWT signature using HMAC-SHA256
+ * SECURITY: Signature is verified BEFORE parsing the payload to prevent attacks
  */
 async function verifyJWT(token: string, secret: string): Promise<JWTPayload | null> {
   try {
+    // Validate token length to prevent DoS
+    const MAX_TOKEN_LENGTH = 8192
+    if (!token || token.length > MAX_TOKEN_LENGTH) {
+      return null
+    }
+
     const parts = token.split('.')
     if (parts.length !== 3) {
       return null
@@ -79,17 +86,7 @@ async function verifyJWT(token: string, secret: string): Promise<JWTPayload | nu
 
     const [headerB64, payloadB64, signatureB64] = parts
 
-    // Decode payload
-    const payloadJson = base64UrlDecode(payloadB64)
-    const payload = JSON.parse(payloadJson) as JWTPayload
-
-    // Check expiration
-    const now = Math.floor(Date.now() / 1000)
-    if (payload.exp && payload.exp < now) {
-      return null
-    }
-
-    // Verify signature
+    // SECURITY: Verify signature FIRST before parsing any data
     const encoder = new TextEncoder()
     const key = await crypto.subtle.importKey(
       'raw',
@@ -109,6 +106,39 @@ async function verifyJWT(token: string, secret: string): Promise<JWTPayload | nu
     const isValid = await crypto.subtle.verify('HMAC', key, signatureBytes, data)
 
     if (!isValid) {
+      return null
+    }
+
+    // SECURITY: Only parse payload AFTER signature is verified
+    // Validate header algorithm
+    const headerJson = base64UrlDecode(headerB64)
+    const header = JSON.parse(headerJson) as { alg: string; typ: string }
+    if (header.alg !== 'HS256' || header.typ !== 'JWT') {
+      return null
+    }
+
+    // Parse payload (safe now that signature is verified)
+    const payloadJson = base64UrlDecode(payloadB64)
+    const payload = JSON.parse(payloadJson) as JWTPayload
+
+    // Validate required fields
+    if (
+      typeof payload.sub !== 'string' ||
+      typeof payload.exp !== 'number' ||
+      typeof payload.iat !== 'number'
+    ) {
+      return null
+    }
+
+    // Check expiration - exp MUST be present and valid (no conditional check)
+    const now = Math.floor(Date.now() / 1000)
+    const CLOCK_SKEW_TOLERANCE = 60 // 60 seconds tolerance
+    if (payload.exp < now - CLOCK_SKEW_TOLERANCE) {
+      return null
+    }
+
+    // Validate iat (issued at) is not in the future
+    if (payload.iat > now + CLOCK_SKEW_TOLERANCE) {
       return null
     }
 
@@ -160,7 +190,8 @@ async function isSessionValid(
     const hashArray = Array.from(new Uint8Array(hashBuffer))
     const tokenHash = hashArray.map((b) => b.toString(16).padStart(2, '0')).join('')
 
-    const blacklistKey = `blacklist:${tokenHash.substring(0, 32)}`
+    // SECURITY: Use full hash to prevent collision attacks
+    const blacklistKey = `blacklist:${tokenHash}`
     const isBlacklisted = await kv.get(blacklistKey)
     
     // If not blacklisted, session is valid
@@ -368,3 +399,8 @@ export async function createJWT(
 
   return `${headerB64}.${payloadB64}.${signatureB64}`
 }
+
+/**
+ * Alias for requireAuth - for backwards compatibility
+ */
+export const authMiddleware = requireAuth

@@ -99,6 +99,13 @@ const EXTRACTION_PATTERNS = {
     /i always want ([^,.]+)/i,
     /please always ([^,.]+)/i,
   ],
+  // Favorite/favourite patterns - capture the whole statement
+  favorite: [
+    /my fav(?:ou)?rite (?:color|colour) is ([^,.]+)/i,
+    /my fav(?:ou)?rite (\w+) is ([^,.]+)/i,
+    /([^,.]+) is my fav(?:ou)?rite (?:color|colour)/i,
+    /([^,.]+) is my fav(?:ou)?rite/i,
+  ],
   project: [
     /i'm working on ([^,.]+)/i,
     /my project is ([^,.]+)/i,
@@ -118,6 +125,11 @@ const EXTRACTION_PATTERNS = {
     /^save (?:this: )?(.+)/i,
     /^store (?:this: )?(.+)/i,
     /^memorize (.+)/i,
+    // Also match "remember that" anywhere in the message
+    /remember (?:that )?(.+)/i,
+    // Match "can you remember" style
+    /can you remember (?:that )?(.+)/i,
+    /please? ?save (?:that )?(.+)/i,
   ],
 };
 
@@ -611,15 +623,22 @@ export class MemoryService {
       for (const pattern of patterns) {
         const match = text.match(pattern);
         if (match && match[1]) {
-          const value = match[1].trim();
+          // Handle patterns with multiple capture groups (like "my favorite X is Y")
+          let value: string;
+          if (match[2]) {
+            // Pattern like "my favorite color is blue" - combine the groups
+            value = `${match[1]} is ${match[2]}`.trim();
+          } else {
+            value = match[1].trim();
+          }
           
           // Determine memory type
           let type: MemoryType = 'fact';
           let key = category;
           
-          if (category === 'preference') {
+          if (category === 'preference' || category === 'favorite') {
             type = 'preference';
-            key = `preference_${Date.now()}`;
+            key = `favorite_${Date.now()}`;
           } else if (category === 'project') {
             type = 'project';
             key = `project_${value.slice(0, 20).toLowerCase().replace(/\s+/g, '_')}`;
@@ -627,6 +646,8 @@ export class MemoryService {
             type = 'instruction';
             key = `instruction_${Date.now()}`;
           }
+
+          console.log(`[MemoryService] Auto-extracted from "${category}" pattern: "${value}"`);
 
           const memory = await this.create(userId, {
             type,

@@ -29,6 +29,7 @@ import { speech } from './speech'
 import { images } from './images'
 import { importexport } from './importexport'
 import { convsearch } from './convsearch'
+import { encryption } from './encryption'
 
 // Types for Cloudflare bindings
 interface Env {
@@ -56,23 +57,36 @@ interface Variables {
   }
 }
 
+// Import auth middleware
+import { authMiddleware } from '../middleware/auth'
+
 // Create main API router
 const api = new Hono<{ Bindings: Env; Variables: Variables }>()
 
-// TODO: Add authentication middleware for protected routes
-// import { authMiddleware } from '../middleware/auth'
-// api.use('/user/*', authMiddleware)
-// api.use('/convos/*', authMiddleware)
-// api.use('/messages/*', authMiddleware)
-// api.use('/presets/*', authMiddleware)
-// api.use('/files/*', authMiddleware)
-// api.use('/agents/*', authMiddleware)
-// api.use('/search/*', authMiddleware)
-// api.use('/share/*', authMiddleware)
-// api.use('/tags/*', authMiddleware)
-// api.use('/prompts/*', authMiddleware)
-// api.use('/balance/*', authMiddleware)
-// api.use('/mcp/*', authMiddleware)
+// Apply authentication middleware to all protected routes
+api.use('/user/*', authMiddleware)
+api.use('/convos/*', authMiddleware)
+api.use('/messages/*', authMiddleware)
+api.use('/presets/*', authMiddleware)
+api.use('/files/*', authMiddleware)
+api.use('/agents/*', authMiddleware)
+api.use('/search/*', authMiddleware)
+api.use('/share/*', authMiddleware)
+api.use('/tags/*', authMiddleware)
+api.use('/prompts/*', authMiddleware)
+api.use('/balance/*', authMiddleware)
+api.use('/mcp/*', authMiddleware)
+api.use('/chat/*', authMiddleware)
+api.use('/code/*', authMiddleware)
+api.use('/artifacts/*', authMiddleware)
+api.use('/memory/*', authMiddleware)
+api.use('/speech/*', authMiddleware)
+api.use('/images/*', authMiddleware)
+api.use('/data/*', authMiddleware)
+api.use('/convsearch/*', authMiddleware)
+api.use('/encryption/*', authMiddleware)
+// NOTE: Migration routes have their own dedicated auth middleware (MIGRATION_SECRET)
+// We don't apply standard authMiddleware here because migrations may run before any users exist
 
 // Mount route modules
 api.route('/auth', auth)
@@ -98,6 +112,7 @@ api.route('/speech', speech)
 api.route('/images', images)
 api.route('/data', importexport)  // Handles both /data/import/* and /data/export/*
 api.route('/convsearch', convsearch)
+api.route('/encryption', encryption)  // E2EE key management
 
 // API health check
 api.get('/health', (c) => {
@@ -132,6 +147,7 @@ export {
   images,
   importexport,
   convsearch,
+  encryption,
 }
 
 // Export combined API router

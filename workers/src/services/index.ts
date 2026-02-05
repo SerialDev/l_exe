@@ -89,6 +89,7 @@ export {
   generateSecret,
   generateTOTP,
   verifyTOTP,
+  verifyTOTPWithReplayProtection,
   generateBackupCodes,
 } from './totp';
 

@@ -6,6 +6,7 @@
 import { create } from 'zustand';
 import type { Conversation, Message, SendMessageRequest, Endpoint } from '../types';
 import * as api from '../services/api';
+import { encryptConversationMessages, decryptMessages, isEncryptionEnabled } from '../services/encryptedApi';
 
 interface ChatStore {
   // State
@@ -17,6 +18,9 @@ interface ChatStore {
   streamingMessageId: string | null;
   streamingContent: string;
   error: string | null;
+  encryptionError: string | null;
+  abortController: AbortController | null;
+  loadingConversationId: string | null;
   
   // Settings
   selectedModel: string;
@@ -40,10 +44,9 @@ interface ChatStore {
   setSystemPrompt: (prompt: string) => void;
   
   clearError: () => void;
+  clearEncryptionError: () => void;
   newConversation: () => void;
 }
-
-let abortController: AbortController | null = null;
 
 export const useChatStore = create<ChatStore>((set, get) => ({
   // Initial state
@@ -55,6 +58,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   streamingMessageId: null,
   streamingContent: '',
   error: null,
+  encryptionError: null,
+  abortController: null,
+  loadingConversationId: null,
   
   // Default settings
   selectedModel: 'gpt-4o',
@@ -79,30 +85,45 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   // Select and load a conversation
   selectConversation: async (id) => {
     if (!id) {
-      set({ currentConversation: null, messages: [] });
+      set({ currentConversation: null, messages: [], loadingConversationId: null });
       return;
     }
     
-    set({ isLoading: true, error: null });
+    // Store which conversation we're loading to handle race conditions
+    set({ isLoading: true, error: null, loadingConversationId: id });
+    
     try {
-      const [conversation, messages] = await Promise.all([
+      const [conversation, messagesRaw] = await Promise.all([
         api.getConversation(id),
         api.getMessages(id),
       ]);
+      
+      // Check if this is still the conversation we want (handle rapid clicks)
+      if (get().loadingConversationId !== id) {
+        return; // User clicked another conversation, discard this result
+      }
+      
+      // Decrypt messages if encryption is enabled (E2EE)
+      const messages = await decryptMessages(messagesRaw);
       
       set({
         currentConversation: conversation,
         messages,
         isLoading: false,
+        loadingConversationId: null,
         // Update model/endpoint from conversation
         selectedModel: conversation.model,
         selectedEndpoint: conversation.endpoint as Endpoint,
       });
     } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : 'Failed to load conversation',
-        isLoading: false,
-      });
+      // Only set error if this is still the active request
+      if (get().loadingConversationId === id) {
+        set({
+          error: error instanceof Error ? error.message : 'Failed to load conversation',
+          isLoading: false,
+          loadingConversationId: null,
+        });
+      }
     }
   },
   
@@ -159,15 +180,23 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       createdAt: new Date().toISOString(),
     };
     
+    // Abort any existing request first
+    const existingController = get().abortController;
+    if (existingController) {
+      existingController.abort();
+    }
+    
+    // Create new abort controller
+    const newAbortController = new AbortController();
+    
     set({
       messages: [...messages, userMessage],
       isStreaming: true,
       streamingContent: '',
       error: null,
+      encryptionError: null,
+      abortController: newAbortController,
     });
-    
-    // Create abort controller
-    abortController = new AbortController();
     
     const request: SendMessageRequest & { files?: string[] } = {
       conversationId: currentConversation?.conversationId,
@@ -219,7 +248,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             });
           },
           
-          onDone: (data) => {
+          onDone: async (data) => {
             console.log('[ChatStore] onDone called with:', data);
             const assistantMessage: Message = {
               id: data.messageId,
@@ -249,9 +278,30 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 : state.conversations,
             }));
             console.log('[ChatStore] State updated, isStreaming should be false');
+            
+            // Encrypt messages in storage (E2EE)
+            // This happens in the background after the UI updates
+            if (isEncryptionEnabled()) {
+              const userMsgId = data.parentMessageId;
+              if (userMsgId) {
+                try {
+                  await encryptConversationMessages(
+                    userMsgId,
+                    text, // Original user message text
+                    data.messageId,
+                    data.text // AI response text
+                  );
+                } catch (err) {
+                  console.error('[E2EE] Failed to encrypt messages:', err);
+                  set({ 
+                    encryptionError: 'Failed to encrypt messages. Your messages may be stored unencrypted.' 
+                  });
+                }
+              }
+            }
           },
         },
-        abortController.signal
+        newAbortController.signal
       );
     } catch (error) {
       if ((error as Error).name === 'AbortError') {
@@ -259,17 +309,19 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         set({
           isStreaming: false,
           streamingMessageId: null,
+          abortController: null,
         });
       } else {
         set({
           error: error instanceof Error ? error.message : 'Failed to send message',
           isStreaming: false,
           streamingMessageId: null,
+          abortController: null,
         });
       }
     }
     
-    abortController = null;
+    set({ abortController: null });
   },
   
   // Regenerate a message
@@ -294,7 +346,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     });
     
     // Create abort controller
-    abortController = new AbortController();
+    const newAbortController = new AbortController();
+    set({ abortController: newAbortController });
     
     try {
       await api.regenerateMessage(
@@ -344,7 +397,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             }));
           },
         },
-        abortController.signal
+        newAbortController.signal
       );
     } catch (error) {
       if ((error as Error).name !== 'AbortError') {
@@ -352,22 +405,24 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           error: error instanceof Error ? error.message : 'Failed to regenerate message',
           isStreaming: false,
           streamingMessageId: null,
+          abortController: null,
         });
       }
     }
     
-    abortController = null;
+    set({ abortController: null });
   },
 
   // Stop message generation
   stopGeneration: () => {
-    if (abortController) {
-      abortController.abort();
-      abortController = null;
+    const currentAbortController = get().abortController;
+    if (currentAbortController) {
+      currentAbortController.abort();
     }
     
-    // Save partial response as message
-    const { streamingContent, streamingMessageId, currentConversation, messages } = get();
+    // Get all state at once to avoid stale state issues
+    const state = get();
+    const { streamingContent, streamingMessageId, currentConversation, messages, selectedModel, selectedEndpoint } = state;
     
     if (streamingContent && streamingMessageId) {
       const partialMessage: Message = {
@@ -377,8 +432,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         parentMessageId: messages.length > 0 ? messages[messages.length - 1].messageId : null,
         role: 'assistant',
         content: streamingContent,
-        model: get().selectedModel,
-        endpoint: get().selectedEndpoint,
+        model: selectedModel,
+        endpoint: selectedEndpoint,
         isCreatedByUser: false,
         unfinished: true,
         createdAt: new Date().toISOString(),
@@ -389,12 +444,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         isStreaming: false,
         streamingContent: '',
         streamingMessageId: null,
+        abortController: null,
       });
     } else {
       set({
         isStreaming: false,
         streamingContent: '',
         streamingMessageId: null,
+        abortController: null,
       });
     }
   },
@@ -407,6 +464,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   
   // Utilities
   clearError: () => set({ error: null }),
+  clearEncryptionError: () => set({ encryptionError: null }),
   
   newConversation: () => set({
     currentConversation: null,

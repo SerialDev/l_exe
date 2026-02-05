@@ -265,7 +265,7 @@ function HTMLPreview({ content }: { content: string }) {
     <iframe
       srcDoc={fullHtml}
       className="w-full min-h-[300px] border-0 bg-white rounded"
-      sandbox="allow-scripts allow-same-origin"
+      sandbox="allow-scripts"
       title="HTML Preview"
     />
   );

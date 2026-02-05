@@ -5,6 +5,8 @@
 
 import { useState, useEffect } from 'react';
 import { useAuthStore } from '../../stores/authStore';
+import { useEncryptionStore } from '../../stores/encryptionStore';
+import { getEncryptionKey } from '../../services/api';
 import {
   X,
   User,
@@ -20,6 +22,7 @@ import {
   Brain,
   Search,
   Plus,
+  Lock,
 } from 'lucide-react';
 
 interface SettingsModalProps {
@@ -333,6 +336,281 @@ function ApiKeysTab() {
   );
 }
 
+/**
+ * Encryption Section Component
+ * Allows users to set up and manage E2E encryption
+ */
+function EncryptionSection() {
+  const { 
+    isInitialized, 
+    isEncryptionEnabled, 
+    isLoading, 
+    error, 
+    setupEncryption,
+    initializeEncryption,
+    clearError 
+  } = useEncryptionStore();
+  
+  const [encryptionPassword, setEncryptionPassword] = useState('');
+  const [confirmEncryptionPassword, setConfirmEncryptionPassword] = useState('');
+  const [showEncryptionPassword, setShowEncryptionPassword] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [mode, setMode] = useState<'setup' | 'unlock' | null>(null);
+
+  // Check if encryption key exists but is not unlocked
+  useEffect(() => {
+    const checkEncryptionStatus = async () => {
+      try {
+        const keyData = await getEncryptionKey();
+        if (keyData.exists && !isEncryptionEnabled) {
+          // Key exists but not unlocked - show unlock UI
+          setMode('unlock');
+        } else if (!keyData.exists) {
+          // No key - show setup UI
+          setMode('setup');
+        }
+      } catch {
+        // Ignore errors
+      }
+    };
+    checkEncryptionStatus();
+  }, [isEncryptionEnabled]);
+
+  const handleSetupEncryption = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLocalError(null);
+    setSuccessMessage(null);
+    clearError();
+
+    if (encryptionPassword.length < 8) {
+      setLocalError('Encryption password must be at least 8 characters');
+      return;
+    }
+
+    if (encryptionPassword !== confirmEncryptionPassword) {
+      setLocalError('Passwords do not match');
+      return;
+    }
+
+    try {
+      await setupEncryption(encryptionPassword);
+      setSuccessMessage('Encryption enabled! Your messages are now protected.');
+      setEncryptionPassword('');
+      setConfirmEncryptionPassword('');
+      setMode(null);
+    } catch {
+      // Error is set by the store
+    }
+  };
+
+  const handleUnlockEncryption = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLocalError(null);
+    setSuccessMessage(null);
+    clearError();
+
+    try {
+      await initializeEncryption(encryptionPassword);
+      if (useEncryptionStore.getState().isEncryptionEnabled) {
+        setSuccessMessage('Encryption unlocked!');
+        setEncryptionPassword('');
+        setMode(null);
+      }
+    } catch {
+      // Error is set by the store
+    }
+  };
+
+  const displayError = localError || error;
+
+  return (
+    <div className="mt-8 pt-6 border-t border-gray-200 dark:border-gray-700">
+      <div className="flex items-center gap-2 mb-2">
+        <Lock className="w-5 h-5 text-green-600 dark:text-green-400" />
+        <h3 className="text-lg font-medium text-gray-900 dark:text-white">
+          End-to-End Encryption
+        </h3>
+      </div>
+      
+      <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+        Encrypt your messages so only you can read them. Not even we can access your data.
+      </p>
+
+      {/* Status indicator */}
+      <div className={`mb-4 p-3 rounded-lg flex items-center gap-2 ${
+        isEncryptionEnabled
+          ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400'
+          : 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400'
+      }`}>
+        {isEncryptionEnabled ? (
+          <>
+            <Shield className="w-4 h-4" />
+            <span className="text-sm font-medium">Encryption is active - your messages are protected</span>
+          </>
+        ) : mode === 'unlock' ? (
+          <>
+            <Lock className="w-4 h-4" />
+            <span className="text-sm font-medium">Encryption is locked - enter your password to unlock</span>
+          </>
+        ) : (
+          <>
+            <AlertCircle className="w-4 h-4" />
+            <span className="text-sm font-medium">Encryption not set up - your messages are stored in plain text</span>
+          </>
+        )}
+      </div>
+
+      {/* Error/Success messages */}
+      {displayError && (
+        <div className="mb-4 p-3 bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 rounded-lg flex items-center gap-2">
+          <AlertCircle className="w-4 h-4" />
+          {displayError}
+        </div>
+      )}
+      
+      {successMessage && (
+        <div className="mb-4 p-3 bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 rounded-lg flex items-center gap-2">
+          <Check className="w-4 h-4" />
+          {successMessage}
+        </div>
+      )}
+
+      {/* Setup form (no encryption key exists) */}
+      {mode === 'setup' && !isEncryptionEnabled && (
+        <form onSubmit={handleSetupEncryption} className="space-y-4 p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
+          <div className="p-3 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg">
+            <p className="text-sm text-yellow-700 dark:text-yellow-400 font-medium mb-1">
+              Important: Remember this password!
+            </p>
+            <p className="text-xs text-yellow-600 dark:text-yellow-500">
+              If you forget this password, you will lose access to all your encrypted messages. 
+              There is no way to recover them.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+              Encryption Password
+            </label>
+            <div className="relative">
+              <input
+                type={showEncryptionPassword ? 'text' : 'password'}
+                value={encryptionPassword}
+                onChange={(e) => setEncryptionPassword(e.target.value)}
+                className="w-full px-3 py-2 pr-10 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-green-500 focus:border-transparent outline-none"
+                placeholder="Enter a strong password"
+                required
+                minLength={8}
+              />
+              <button
+                type="button"
+                onClick={() => setShowEncryptionPassword(!showEncryptionPassword)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-gray-600"
+              >
+                {showEncryptionPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+              Confirm Password
+            </label>
+            <input
+              type={showEncryptionPassword ? 'text' : 'password'}
+              value={confirmEncryptionPassword}
+              onChange={(e) => setConfirmEncryptionPassword(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-green-500 focus:border-transparent outline-none"
+              placeholder="Confirm your password"
+              required
+              minLength={8}
+            />
+          </div>
+
+          <button
+            type="submit"
+            disabled={isLoading}
+            className="w-full px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-green-600/50 text-white font-medium rounded-lg transition-colors flex items-center justify-center gap-2"
+          >
+            {isLoading ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                Setting up encryption...
+              </>
+            ) : (
+              <>
+                <Lock className="w-4 h-4" />
+                Enable End-to-End Encryption
+              </>
+            )}
+          </button>
+        </form>
+      )}
+
+      {/* Unlock form (encryption key exists but not unlocked) */}
+      {mode === 'unlock' && !isEncryptionEnabled && (
+        <form onSubmit={handleUnlockEncryption} className="space-y-4 p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
+          <p className="text-sm text-gray-600 dark:text-gray-400">
+            Enter your encryption password to unlock and decrypt your messages.
+          </p>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+              Encryption Password
+            </label>
+            <div className="relative">
+              <input
+                type={showEncryptionPassword ? 'text' : 'password'}
+                value={encryptionPassword}
+                onChange={(e) => setEncryptionPassword(e.target.value)}
+                className="w-full px-3 py-2 pr-10 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-green-500 focus:border-transparent outline-none"
+                placeholder="Enter your encryption password"
+                required
+              />
+              <button
+                type="button"
+                onClick={() => setShowEncryptionPassword(!showEncryptionPassword)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-gray-600"
+              >
+                {showEncryptionPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+          </div>
+
+          <button
+            type="submit"
+            disabled={isLoading}
+            className="w-full px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-green-600/50 text-white font-medium rounded-lg transition-colors flex items-center justify-center gap-2"
+          >
+            {isLoading ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                Unlocking...
+              </>
+            ) : (
+              <>
+                <Key className="w-4 h-4" />
+                Unlock Encryption
+              </>
+            )}
+          </button>
+        </form>
+      )}
+
+      {/* Already enabled - show status */}
+      {isEncryptionEnabled && (
+        <div className="p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
+          <p className="text-sm text-gray-600 dark:text-gray-400">
+            All new messages will be encrypted before being stored. Existing unencrypted messages 
+            will remain readable but won't be automatically encrypted.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SecurityTab() {
   const { changePassword, deleteAccount, user } = useAuthStore();
   const [currentPassword, setCurrentPassword] = useState('');
@@ -481,6 +759,9 @@ function SecurityTab() {
           </button>
         </form>
       )}
+
+      {/* End-to-End Encryption Section */}
+      <EncryptionSection />
 
       {/* Danger Zone */}
       <div className="mt-8 pt-6 border-t border-gray-200 dark:border-gray-700">
