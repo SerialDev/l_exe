@@ -752,10 +752,10 @@ export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="w-full max-w-lg bg-white dark:bg-gray-800 rounded-2xl shadow-xl overflow-hidden">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="w-full max-w-lg bg-white dark:bg-gray-800 rounded-2xl shadow-xl overflow-hidden flex flex-col max-h-[90vh]">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
           <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
             Import / Export
           </h2>
@@ -768,7 +768,7 @@ export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
         </div>
 
         {/* Tabs */}
-        <div className="flex border-b border-gray-200 dark:border-gray-700">
+        <div className="flex border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
           <button
             onClick={() => setActiveTab('export')}
             className={`flex-1 py-3 text-sm font-medium transition-colors ${
@@ -804,8 +804,8 @@ export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
           </button>
         </div>
 
-        {/* Content */}
-        <div className="p-6">
+        {/* Content - Scrollable */}
+        <div className="p-6 overflow-y-auto flex-1">
           {message && (
             <div
               className={`mb-4 p-3 rounded-lg flex items-center gap-2 ${
