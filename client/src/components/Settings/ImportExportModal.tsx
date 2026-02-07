@@ -57,6 +57,22 @@ interface SplitProgress {
   processedConversations: number;
 }
 
+// Token statistics for analyzed file
+interface TokenStats {
+  totalTokens: number;
+  totalCharacters: number;
+  totalWords: number;
+  conversationCount: number;
+  perConversation: Array<{
+    index: number;
+    title: string;
+    tokens: number;
+    messageCount: number;
+  }>;
+  largestConversation: { title: string; tokens: number } | null;
+  averageTokensPerConversation: number;
+}
+
 export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
   const [activeTab, setActiveTab] = useState<'export' | 'import' | 'tools'>('export');
   const [exportFormat, setExportFormat] = useState<ExportFormat>('json');
@@ -69,8 +85,11 @@ export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
   const [importResult, setImportResult] = useState<api.ImportResult | null>(null);
   const [importProgress, setImportProgress] = useState<ImportProgress | null>(null);
   const [splitProgress, setSplitProgress] = useState<SplitProgress | null>(null);
+  const [tokenStats, setTokenStats] = useState<TokenStats | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const splitFileInputRef = useRef<HTMLInputElement>(null);
+  const tokenAnalyzerInputRef = useRef<HTMLInputElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const { currentConversation, loadConversations } = useChatStore();
@@ -266,6 +285,149 @@ export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
       abortControllerRef.current.abort();
       setMessage({ type: 'error', text: 'Cancelling...' });
     }
+  };
+
+  /**
+   * Estimate token count from text
+   * Uses cl100k_base approximation: ~4 characters per token for English
+   * This is a rough estimate - actual tokenization varies by model
+   */
+  const estimateTokens = (text: string): number => {
+    if (!text) return 0;
+    // More accurate estimation considering:
+    // - Average ~4 chars per token for English
+    // - Whitespace and punctuation often become separate tokens
+    // - Code and special characters may use more tokens
+    const charCount = text.length;
+    const wordCount = text.split(/\s+/).filter(w => w.length > 0).length;
+    
+    // Weighted average: chars/4 with word count adjustment
+    return Math.ceil((charCount / 4) * 0.7 + wordCount * 1.3 * 0.3);
+  };
+
+  /**
+   * Extract all text content from a conversation for token counting
+   */
+  const extractConversationText = (conversation: Record<string, unknown>): string => {
+    const textParts: string[] = [];
+    
+    // Add title
+    if (conversation.title) {
+      textParts.push(String(conversation.title));
+    }
+    
+    // Extract messages using existing function
+    const messages = extractMessages(conversation);
+    for (const msg of messages) {
+      textParts.push(msg.content);
+    }
+    
+    // Also check for system message / custom instructions
+    if (conversation.system_message) {
+      textParts.push(String(conversation.system_message));
+    }
+    
+    return textParts.join('\n');
+  };
+
+  /**
+   * Analyze a JSON file for token statistics
+   */
+  const handleAnalyzeTokens = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsAnalyzing(true);
+    setMessage(null);
+    setTokenStats(null);
+
+    try {
+      const text = await file.text();
+      let data: unknown[];
+      
+      try {
+        const parsed = JSON.parse(text);
+        data = Array.isArray(parsed) ? parsed : [parsed];
+      } catch {
+        throw new Error('Invalid JSON file');
+      }
+
+      if (data.length === 0) {
+        throw new Error('No conversations found in file');
+      }
+
+      let totalTokens = 0;
+      let totalCharacters = 0;
+      let totalWords = 0;
+      const perConversation: TokenStats['perConversation'] = [];
+      let largestConversation: TokenStats['largestConversation'] = null;
+
+      for (let i = 0; i < data.length; i++) {
+        const conversation = data[i] as Record<string, unknown>;
+        const title = (conversation.title as string) || `Conversation ${i + 1}`;
+        const conversationText = extractConversationText(conversation);
+        
+        const tokens = estimateTokens(conversationText);
+        const chars = conversationText.length;
+        const words = conversationText.split(/\s+/).filter(w => w.length > 0).length;
+        const messages = extractMessages(conversation);
+
+        totalTokens += tokens;
+        totalCharacters += chars;
+        totalWords += words;
+
+        perConversation.push({
+          index: i + 1,
+          title: title.substring(0, 50),
+          tokens,
+          messageCount: messages.length,
+        });
+
+        if (!largestConversation || tokens > largestConversation.tokens) {
+          largestConversation = { title, tokens };
+        }
+
+        // Yield to UI every 100 conversations
+        if (i % 100 === 0) {
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+      }
+
+      // Sort by tokens descending for display
+      perConversation.sort((a, b) => b.tokens - a.tokens);
+
+      setTokenStats({
+        totalTokens,
+        totalCharacters,
+        totalWords,
+        conversationCount: data.length,
+        perConversation,
+        largestConversation,
+        averageTokensPerConversation: Math.round(totalTokens / data.length),
+      });
+
+      setMessage({
+        type: 'success',
+        text: `Analyzed ${data.length} conversations`,
+      });
+    } catch (error) {
+      setMessage({
+        type: 'error',
+        text: error instanceof Error ? error.message : 'Failed to analyze file',
+      });
+    } finally {
+      setIsAnalyzing(false);
+      if (tokenAnalyzerInputRef.current) {
+        tokenAnalyzerInputRef.current.value = '';
+      }
+    }
+  };
+
+  /**
+   * Format large numbers with commas
+   */
+  const formatNumber = (num: number): string => {
+    return num.toLocaleString();
   };
 
   /**
@@ -1038,6 +1200,167 @@ export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
                       <li>PDFs include formatted messages with styling</li>
                     )}
                   </ul>
+                </div>
+              </div>
+
+              {/* Token Counter Tool */}
+              <div className="p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
+                <div className="flex items-center gap-3 mb-3">
+                  <div className="p-2 bg-blue-100 dark:bg-blue-900/30 rounded-lg">
+                    <FileText className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+                  </div>
+                  <div>
+                    <h3 className="font-medium text-gray-900 dark:text-white">
+                      Token Counter
+                    </h3>
+                    <p className="text-sm text-gray-500 dark:text-gray-400">
+                      Analyze token usage in your conversation exports
+                    </p>
+                  </div>
+                </div>
+
+                <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+                  Upload a JSON file to estimate the total token count across all conversations.
+                  Useful for understanding API costs and context window usage.
+                </p>
+
+                <input
+                  ref={tokenAnalyzerInputRef}
+                  type="file"
+                  accept=".json"
+                  onChange={handleAnalyzeTokens}
+                  className="hidden"
+                />
+
+                {/* Analyzing indicator */}
+                {isAnalyzing && (
+                  <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg mb-4">
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="w-5 h-5 animate-spin text-blue-600" />
+                      <span className="font-medium text-blue-700 dark:text-blue-400">
+                        Analyzing conversations...
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Token Statistics Display */}
+                {tokenStats && !isAnalyzing && (
+                  <div className="p-4 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-600 mb-4 space-y-4">
+                    {/* Summary Stats */}
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+                        <div className="text-2xl font-bold text-blue-600 dark:text-blue-400">
+                          {formatNumber(tokenStats.totalTokens)}
+                        </div>
+                        <div className="text-xs text-gray-500 dark:text-gray-400">
+                          Estimated Tokens
+                        </div>
+                      </div>
+                      <div className="p-3 bg-gray-100 dark:bg-gray-700 rounded-lg">
+                        <div className="text-2xl font-bold text-gray-700 dark:text-gray-300">
+                          {formatNumber(tokenStats.conversationCount)}
+                        </div>
+                        <div className="text-xs text-gray-500 dark:text-gray-400">
+                          Conversations
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Additional Stats */}
+                    <div className="grid grid-cols-3 gap-2 text-center">
+                      <div className="p-2 bg-gray-50 dark:bg-gray-700/50 rounded">
+                        <div className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                          {formatNumber(tokenStats.totalCharacters)}
+                        </div>
+                        <div className="text-xs text-gray-500">Characters</div>
+                      </div>
+                      <div className="p-2 bg-gray-50 dark:bg-gray-700/50 rounded">
+                        <div className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                          {formatNumber(tokenStats.totalWords)}
+                        </div>
+                        <div className="text-xs text-gray-500">Words</div>
+                      </div>
+                      <div className="p-2 bg-gray-50 dark:bg-gray-700/50 rounded">
+                        <div className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                          {formatNumber(tokenStats.averageTokensPerConversation)}
+                        </div>
+                        <div className="text-xs text-gray-500">Avg/Conv</div>
+                      </div>
+                    </div>
+
+                    {/* Largest Conversation */}
+                    {tokenStats.largestConversation && (
+                      <div className="p-2 bg-yellow-50 dark:bg-yellow-900/20 rounded border border-yellow-200 dark:border-yellow-800">
+                        <div className="text-xs text-yellow-700 dark:text-yellow-400">
+                          <strong>Largest conversation:</strong>{' '}
+                          {tokenStats.largestConversation.title.substring(0, 40)}
+                          {tokenStats.largestConversation.title.length > 40 ? '...' : ''}{' '}
+                          ({formatNumber(tokenStats.largestConversation.tokens)} tokens)
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Top Conversations by Token Count */}
+                    <div>
+                      <div className="text-xs font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Top 5 by Token Count:
+                      </div>
+                      <div className="space-y-1 max-h-32 overflow-y-auto">
+                        {tokenStats.perConversation.slice(0, 5).map((conv) => (
+                          <div
+                            key={conv.index}
+                            className="flex justify-between items-center text-xs p-1.5 bg-gray-50 dark:bg-gray-700/50 rounded"
+                          >
+                            <span className="text-gray-600 dark:text-gray-400 truncate flex-1 mr-2">
+                              {conv.title}
+                            </span>
+                            <span className="text-gray-500 dark:text-gray-500 whitespace-nowrap">
+                              {conv.messageCount} msgs
+                            </span>
+                            <span className="font-medium text-blue-600 dark:text-blue-400 ml-2 whitespace-nowrap">
+                              {formatNumber(conv.tokens)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Cost Estimates */}
+                    <div className="p-2 bg-green-50 dark:bg-green-900/20 rounded border border-green-200 dark:border-green-800">
+                      <div className="text-xs text-green-700 dark:text-green-400 space-y-1">
+                        <div className="font-medium">Estimated API Costs (if processed):</div>
+                        <div className="grid grid-cols-2 gap-2 mt-1">
+                          <div>GPT-4o: ~${((tokenStats.totalTokens / 1000) * 0.005).toFixed(2)}</div>
+                          <div>GPT-4: ~${((tokenStats.totalTokens / 1000) * 0.03).toFixed(2)}</div>
+                          <div>Claude 3.5: ~${((tokenStats.totalTokens / 1000) * 0.003).toFixed(2)}</div>
+                          <div>GPT-3.5: ~${((tokenStats.totalTokens / 1000) * 0.0005).toFixed(2)}</div>
+                        </div>
+                        <div className="text-[10px] text-green-600 dark:text-green-500 mt-1">
+                          * Input token pricing only, estimates may vary
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Upload button */}
+                {!isAnalyzing && (
+                  <button
+                    onClick={() => tokenAnalyzerInputRef.current?.click()}
+                    className="w-full py-4 border-2 border-dashed border-blue-300 dark:border-blue-600 rounded-lg hover:border-blue-500 dark:hover:border-blue-500 transition-colors flex flex-col items-center gap-2 text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400"
+                  >
+                    <FileText className="w-6 h-6" />
+                    <span className="font-medium">
+                      {tokenStats ? 'Analyze Another File' : 'Select JSON file to analyze'}
+                    </span>
+                    <span className="text-xs">Get token counts and cost estimates</span>
+                  </button>
+                )}
+
+                <div className="mt-4 text-xs text-gray-500 dark:text-gray-400">
+                  <strong>Note:</strong> Token counts are estimates based on character/word ratios.
+                  Actual token counts may vary depending on the model's tokenizer (GPT uses cl100k_base, Claude uses its own).
                 </div>
               </div>
             </div>
