@@ -18,8 +18,12 @@ import {
   Package,
 } from 'lucide-react';
 import JSZip from 'jszip';
+import { jsPDF } from 'jspdf';
 import * as api from '../../services/api';
 import { useChatStore } from '../../stores/chatStore';
+
+// Type for split output format
+type SplitOutputFormat = 'json' | 'pdf';
 
 interface ImportExportModalProps {
   isOpen: boolean;
@@ -60,6 +64,7 @@ export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
   const [isExporting, setIsExporting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [isSplitting, setIsSplitting] = useState(false);
+  const [splitOutputFormat, setSplitOutputFormat] = useState<SplitOutputFormat>('json');
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [importResult, setImportResult] = useState<api.ImportResult | null>(null);
   const [importProgress, setImportProgress] = useState<ImportProgress | null>(null);
@@ -264,8 +269,200 @@ export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
   };
 
   /**
+   * Generate a sanitized filename from conversation data
+   */
+  const generateFilename = (
+    conversation: Record<string, unknown>, 
+    index: number, 
+    extension: string
+  ): string => {
+    const title = conversation.title as string | undefined;
+    const id = conversation.id || conversation.conversationId || conversation.conversation_id;
+    
+    if (title) {
+      const sanitizedTitle = title
+        .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+        .replace(/\s+/g, '_')
+        .substring(0, 50);
+      return `${String(index + 1).padStart(4, '0')}_${sanitizedTitle}.${extension}`;
+    } else if (id) {
+      return `${String(index + 1).padStart(4, '0')}_${id}.${extension}`;
+    }
+    return `conversation_${String(index + 1).padStart(4, '0')}.${extension}`;
+  };
+
+  /**
+   * Extract messages from various conversation formats
+   */
+  const extractMessages = (conversation: Record<string, unknown>): Array<{ role: string; content: string; author?: string }> => {
+    const messages: Array<{ role: string; content: string; author?: string }> = [];
+    
+    // ChatGPT format: mapping object with message nodes
+    if (conversation.mapping && typeof conversation.mapping === 'object') {
+      const mapping = conversation.mapping as Record<string, { message?: { author?: { role?: string }; content?: { parts?: string[] } } }>;
+      
+      // Find root and traverse
+      const nodes = Object.values(mapping);
+      for (const node of nodes) {
+        if (node.message?.content?.parts && node.message.author?.role) {
+          const role = node.message.author.role;
+          const content = node.message.content.parts.join('\n');
+          if (content.trim() && (role === 'user' || role === 'assistant')) {
+            messages.push({ role, content });
+          }
+        }
+      }
+    }
+    
+    // Standard messages array format
+    if (Array.isArray(conversation.messages)) {
+      for (const msg of conversation.messages) {
+        const m = msg as Record<string, unknown>;
+        const role = (m.role || m.author || 'unknown') as string;
+        const content = (m.content || m.text || '') as string;
+        if (content.trim()) {
+          messages.push({ role, content });
+        }
+      }
+    }
+    
+    return messages;
+  };
+
+  /**
+   * Create a PDF from a conversation
+   */
+  const createConversationPDF = (
+    conversation: Record<string, unknown>,
+    index: number,
+    total: number,
+    originalFilename: string
+  ): ArrayBuffer => {
+    const doc = new jsPDF({
+      orientation: 'portrait',
+      unit: 'mm',
+      format: 'a4',
+    });
+    
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const margin = 15;
+    const contentWidth = pageWidth - (margin * 2);
+    let yPos = margin;
+    
+    const title = (conversation.title as string) || `Conversation ${index + 1}`;
+    const createTime = conversation.create_time || conversation.created_at || conversation.createdAt;
+    
+    // Helper to add new page if needed
+    const checkNewPage = (neededHeight: number) => {
+      if (yPos + neededHeight > pageHeight - margin) {
+        doc.addPage();
+        yPos = margin;
+        return true;
+      }
+      return false;
+    };
+    
+    // Helper to wrap text and return lines
+    const wrapText = (text: string, maxWidth: number, fontSize: number): string[] => {
+      doc.setFontSize(fontSize);
+      return doc.splitTextToSize(text, maxWidth);
+    };
+    
+    // Title
+    doc.setFontSize(16);
+    doc.setFont('helvetica', 'bold');
+    const titleLines = wrapText(title, contentWidth, 16);
+    doc.text(titleLines, margin, yPos);
+    yPos += titleLines.length * 7 + 3;
+    
+    // Metadata
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(128, 128, 128);
+    
+    if (createTime) {
+      const timestamp = typeof createTime === 'number' ? createTime * 1000 : String(createTime);
+      const date = new Date(timestamp);
+      if (!isNaN(date.getTime())) {
+        doc.text(`Created: ${date.toLocaleString()}`, margin, yPos);
+        yPos += 5;
+      }
+    }
+    doc.text(`Conversation ${index + 1} of ${total}`, margin, yPos);
+    yPos += 5;
+    doc.text(`Source: ${originalFilename}`, margin, yPos);
+    yPos += 8;
+    
+    // Separator line
+    doc.setDrawColor(200, 200, 200);
+    doc.line(margin, yPos, pageWidth - margin, yPos);
+    yPos += 8;
+    
+    // Reset text color
+    doc.setTextColor(0, 0, 0);
+    
+    // Extract and render messages
+    const messages = extractMessages(conversation);
+    
+    if (messages.length === 0) {
+      doc.setFontSize(10);
+      doc.setFont('helvetica', 'italic');
+      doc.setTextColor(128, 128, 128);
+      doc.text('No messages found in this conversation.', margin, yPos);
+    } else {
+      for (const msg of messages) {
+        const isUser = msg.role === 'user';
+        const roleLabel = isUser ? 'You' : 'Assistant';
+        const bgColor = isUser ? [240, 240, 255] : [245, 245, 245];
+        
+        // Calculate message height
+        doc.setFontSize(10);
+        const contentLines = wrapText(msg.content, contentWidth - 10, 10);
+        const messageHeight = 8 + (contentLines.length * 5) + 8;
+        
+        checkNewPage(messageHeight);
+        
+        // Draw background
+        doc.setFillColor(bgColor[0], bgColor[1], bgColor[2]);
+        doc.roundedRect(margin, yPos, contentWidth, messageHeight, 2, 2, 'F');
+        
+        // Role label
+        doc.setFontSize(9);
+        doc.setFont('helvetica', 'bold');
+        doc.setTextColor(isUser ? 70 : 50, isUser ? 70 : 120, isUser ? 150 : 50);
+        doc.text(roleLabel, margin + 5, yPos + 6);
+        
+        // Message content
+        doc.setFontSize(10);
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(30, 30, 30);
+        doc.text(contentLines, margin + 5, yPos + 12);
+        
+        yPos += messageHeight + 4;
+      }
+    }
+    
+    // Footer on last page
+    const pageCount = doc.getNumberOfPages();
+    for (let i = 1; i <= pageCount; i++) {
+      doc.setPage(i);
+      doc.setFontSize(8);
+      doc.setTextColor(150, 150, 150);
+      doc.text(
+        `Page ${i} of ${pageCount} | Generated by L_EXE`,
+        pageWidth / 2,
+        pageHeight - 8,
+        { align: 'center' }
+      );
+    }
+    
+    return doc.output('arraybuffer');
+  };
+
+  /**
    * Handle splitting a large JSON blob into individual conversation files
-   * Creates a zip file with each conversation as a separate JSON file
+   * Creates a zip file with each conversation as a separate JSON or PDF file
    */
   const handleSplitFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -302,45 +499,35 @@ export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
 
       // Create a new zip file
       const zip = new JSZip();
+      const extension = splitOutputFormat === 'pdf' ? 'pdf' : 'json';
       
       // Process each conversation
       for (let i = 0; i < data.length; i++) {
         const conversation = data[i] as Record<string, unknown>;
+        const filename = generateFilename(conversation, i, extension);
         
-        // Generate a filename based on conversation properties
-        let filename: string;
-        
-        // Try to get a meaningful name from the conversation
-        const title = conversation.title as string | undefined;
-        const id = conversation.id || conversation.conversationId || conversation.conversation_id;
-        const createTime = conversation.create_time || conversation.created_at || conversation.createdAt;
-        
-        if (title) {
-          // Sanitize title for filename
-          const sanitizedTitle = title
-            .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')  // Remove invalid chars
-            .replace(/\s+/g, '_')                      // Replace spaces
-            .substring(0, 50);                         // Limit length
-          filename = `${String(i + 1).padStart(4, '0')}_${sanitizedTitle}.json`;
-        } else if (id) {
-          filename = `${String(i + 1).padStart(4, '0')}_${id}.json`;
+        if (splitOutputFormat === 'pdf') {
+          // Generate PDF
+          const pdfBuffer = createConversationPDF(
+            conversation, 
+            i, 
+            totalConversations, 
+            file.name
+          );
+          zip.file(filename, pdfBuffer);
         } else {
-          filename = `conversation_${String(i + 1).padStart(4, '0')}.json`;
+          // Generate JSON
+          const enrichedConversation = {
+            ...conversation,
+            _split_metadata: {
+              original_file: file.name,
+              split_index: i + 1,
+              split_total: totalConversations,
+              split_date: new Date().toISOString(),
+            }
+          };
+          zip.file(filename, JSON.stringify(enrichedConversation, null, 2));
         }
-        
-        // Add metadata to each conversation file
-        const enrichedConversation = {
-          ...conversation,
-          _split_metadata: {
-            original_file: file.name,
-            split_index: i + 1,
-            split_total: totalConversations,
-            split_date: new Date().toISOString(),
-          }
-        };
-        
-        // Add to zip with pretty-printed JSON
-        zip.file(filename, JSON.stringify(enrichedConversation, null, 2));
         
         // Update progress every 10 conversations or at the end
         if (i % 10 === 0 || i === data.length - 1) {
@@ -362,7 +549,6 @@ export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
         compression: 'DEFLATE',
         compressionOptions: { level: 6 }
       }, (metadata) => {
-        // Progress callback during zip generation
         if (metadata.percent && metadata.percent % 10 === 0) {
           console.log(`Zip progress: ${metadata.percent.toFixed(0)}%`);
         }
@@ -375,7 +561,8 @@ export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
       
       // Generate zip filename from original file
       const originalName = file.name.replace(/\.json$/i, '');
-      a.download = `${originalName}_split_${totalConversations}_conversations.zip`;
+      const formatLabel = splitOutputFormat === 'pdf' ? 'pdfs' : 'jsons';
+      a.download = `${originalName}_${totalConversations}_${formatLabel}.zip`;
       
       document.body.appendChild(a);
       a.click();
@@ -385,7 +572,7 @@ export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
       setSplitProgress(prev => prev ? { ...prev, status: 'done' } : null);
       setMessage({ 
         type: 'success', 
-        text: `Successfully split into ${totalConversations} files! Download started.` 
+        text: `Successfully created ${totalConversations} ${splitOutputFormat.toUpperCase()} files! Download started.` 
       });
     } catch (error) {
       setSplitProgress(prev => prev ? { ...prev, status: 'error' } : null);
@@ -713,7 +900,7 @@ export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
           {/* Tools Tab */}
           {activeTab === 'tools' && (
             <div className="space-y-4">
-              {/* JSON Splitter Tool */}
+              {/* Conversation Splitter Tool */}
               <div className="p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
                 <div className="flex items-center gap-3 mb-3">
                   <div className="p-2 bg-purple-100 dark:bg-purple-900/30 rounded-lg">
@@ -721,18 +908,69 @@ export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
                   </div>
                   <div>
                     <h3 className="font-medium text-gray-900 dark:text-white">
-                      JSON Splitter
+                      Conversation Splitter
                     </h3>
                     <p className="text-sm text-gray-500 dark:text-gray-400">
-                      Split a large JSON file into individual conversation files
+                      Split a large JSON export into individual files
                     </p>
                   </div>
                 </div>
 
                 <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
                   Upload a JSON file containing multiple conversations (like a ChatGPT export).
-                  Each conversation will be saved as a separate JSON file, then bundled into a downloadable ZIP.
+                  Each conversation will be saved as a separate file, then bundled into a downloadable ZIP.
                 </p>
+
+                {/* Output Format Selector */}
+                <div className="mb-4">
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Output format
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <label
+                      className={`flex items-center gap-2 p-3 rounded-lg cursor-pointer border-2 transition-colors ${
+                        splitOutputFormat === 'json'
+                          ? 'border-purple-600 bg-purple-50 dark:bg-purple-900/20'
+                          : 'border-gray-200 dark:border-gray-600 hover:border-gray-300 dark:hover:border-gray-500'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="splitFormat"
+                        value="json"
+                        checked={splitOutputFormat === 'json'}
+                        onChange={() => setSplitOutputFormat('json')}
+                        className="sr-only"
+                      />
+                      <FileJson className="w-5 h-5 text-purple-600" />
+                      <div>
+                        <div className="font-medium text-gray-900 dark:text-white text-sm">JSON</div>
+                        <div className="text-xs text-gray-500 dark:text-gray-400">Re-importable data</div>
+                      </div>
+                    </label>
+                    <label
+                      className={`flex items-center gap-2 p-3 rounded-lg cursor-pointer border-2 transition-colors ${
+                        splitOutputFormat === 'pdf'
+                          ? 'border-purple-600 bg-purple-50 dark:bg-purple-900/20'
+                          : 'border-gray-200 dark:border-gray-600 hover:border-gray-300 dark:hover:border-gray-500'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="splitFormat"
+                        value="pdf"
+                        checked={splitOutputFormat === 'pdf'}
+                        onChange={() => setSplitOutputFormat('pdf')}
+                        className="sr-only"
+                      />
+                      <FileText className="w-5 h-5 text-red-600" />
+                      <div>
+                        <div className="font-medium text-gray-900 dark:text-white text-sm">PDF</div>
+                        <div className="text-xs text-gray-500 dark:text-gray-400">Readable documents</div>
+                      </div>
+                    </label>
+                  </div>
+                </div>
 
                 <input
                   ref={splitFileInputRef}
@@ -749,7 +987,7 @@ export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
                       <Loader2 className="w-5 h-5 animate-spin text-purple-600" />
                       <span className="font-medium text-purple-700 dark:text-purple-400">
                         {splitProgress.status === 'parsing' ? 'Parsing JSON file...' :
-                         splitProgress.status === 'splitting' ? 'Splitting conversations...' :
+                         splitProgress.status === 'splitting' ? `Creating ${splitOutputFormat.toUpperCase()} files...` :
                          splitProgress.status === 'zipping' ? 'Creating ZIP file...' :
                          'Done!'}
                       </span>
@@ -783,7 +1021,9 @@ export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
                   >
                     <Package className="w-6 h-6" />
                     <span className="font-medium">Select JSON file to split</span>
-                    <span className="text-xs">Output: ZIP file with individual JSONs</span>
+                    <span className="text-xs">
+                      Output: ZIP with {splitOutputFormat === 'pdf' ? 'PDF documents' : 'JSON files'}
+                    </span>
                   </button>
                 )}
 
@@ -791,9 +1031,12 @@ export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
                   <strong>How it works:</strong>
                   <ul className="list-disc list-inside mt-1 space-y-1">
                     <li>Parses your JSON array of conversations</li>
-                    <li>Creates a separate .json file for each conversation</li>
-                    <li>Names files using title or ID when available</li>
+                    <li>Creates a separate {splitOutputFormat === 'pdf' ? 'PDF document' : 'JSON file'} for each</li>
+                    <li>Names files using conversation title or ID</li>
                     <li>Packages everything into a compressed ZIP</li>
+                    {splitOutputFormat === 'pdf' && (
+                      <li>PDFs include formatted messages with styling</li>
+                    )}
                   </ul>
                 </div>
               </div>
