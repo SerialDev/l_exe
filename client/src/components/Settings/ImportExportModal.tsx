@@ -14,7 +14,10 @@ import {
   Check,
   AlertCircle,
   Loader2,
+  Scissors,
+  Package,
 } from 'lucide-react';
+import JSZip from 'jszip';
 import * as api from '../../services/api';
 import { useChatStore } from '../../stores/chatStore';
 
@@ -43,16 +46,26 @@ interface ImportProgress {
   status: 'parsing' | 'importing' | 'done' | 'error';
 }
 
+// Split progress tracking
+interface SplitProgress {
+  status: 'parsing' | 'splitting' | 'zipping' | 'done' | 'error';
+  totalConversations: number;
+  processedConversations: number;
+}
+
 export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
-  const [activeTab, setActiveTab] = useState<'export' | 'import'>('export');
+  const [activeTab, setActiveTab] = useState<'export' | 'import' | 'tools'>('export');
   const [exportFormat, setExportFormat] = useState<ExportFormat>('json');
   const [exportScope, setExportScope] = useState<'current' | 'all'>('current');
   const [isExporting, setIsExporting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [isSplitting, setIsSplitting] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [importResult, setImportResult] = useState<api.ImportResult | null>(null);
   const [importProgress, setImportProgress] = useState<ImportProgress | null>(null);
+  const [splitProgress, setSplitProgress] = useState<SplitProgress | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const splitFileInputRef = useRef<HTMLInputElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const { currentConversation, loadConversations } = useChatStore();
@@ -250,6 +263,145 @@ export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
     }
   };
 
+  /**
+   * Handle splitting a large JSON blob into individual conversation files
+   * Creates a zip file with each conversation as a separate JSON file
+   */
+  const handleSplitFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsSplitting(true);
+    setMessage(null);
+    setSplitProgress({ status: 'parsing', totalConversations: 0, processedConversations: 0 });
+
+    try {
+      // Parse the JSON file
+      const text = await file.text();
+      let data: unknown[];
+      
+      try {
+        const parsed = JSON.parse(text);
+        // Normalize to array
+        data = Array.isArray(parsed) ? parsed : [parsed];
+      } catch {
+        throw new Error('Invalid JSON file');
+      }
+
+      const totalConversations = data.length;
+      
+      if (totalConversations === 0) {
+        throw new Error('No conversations found in file');
+      }
+
+      setSplitProgress({ 
+        status: 'splitting', 
+        totalConversations, 
+        processedConversations: 0 
+      });
+
+      // Create a new zip file
+      const zip = new JSZip();
+      
+      // Process each conversation
+      for (let i = 0; i < data.length; i++) {
+        const conversation = data[i] as Record<string, unknown>;
+        
+        // Generate a filename based on conversation properties
+        let filename: string;
+        
+        // Try to get a meaningful name from the conversation
+        const title = conversation.title as string | undefined;
+        const id = conversation.id || conversation.conversationId || conversation.conversation_id;
+        const createTime = conversation.create_time || conversation.created_at || conversation.createdAt;
+        
+        if (title) {
+          // Sanitize title for filename
+          const sanitizedTitle = title
+            .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')  // Remove invalid chars
+            .replace(/\s+/g, '_')                      // Replace spaces
+            .substring(0, 50);                         // Limit length
+          filename = `${String(i + 1).padStart(4, '0')}_${sanitizedTitle}.json`;
+        } else if (id) {
+          filename = `${String(i + 1).padStart(4, '0')}_${id}.json`;
+        } else {
+          filename = `conversation_${String(i + 1).padStart(4, '0')}.json`;
+        }
+        
+        // Add metadata to each conversation file
+        const enrichedConversation = {
+          ...conversation,
+          _split_metadata: {
+            original_file: file.name,
+            split_index: i + 1,
+            split_total: totalConversations,
+            split_date: new Date().toISOString(),
+          }
+        };
+        
+        // Add to zip with pretty-printed JSON
+        zip.file(filename, JSON.stringify(enrichedConversation, null, 2));
+        
+        // Update progress every 10 conversations or at the end
+        if (i % 10 === 0 || i === data.length - 1) {
+          setSplitProgress(prev => prev ? {
+            ...prev,
+            processedConversations: i + 1
+          } : null);
+          
+          // Yield to UI thread
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+      }
+
+      setSplitProgress(prev => prev ? { ...prev, status: 'zipping' } : null);
+
+      // Generate the zip file
+      const zipBlob = await zip.generateAsync({ 
+        type: 'blob',
+        compression: 'DEFLATE',
+        compressionOptions: { level: 6 }
+      }, (metadata) => {
+        // Progress callback during zip generation
+        if (metadata.percent && metadata.percent % 10 === 0) {
+          console.log(`Zip progress: ${metadata.percent.toFixed(0)}%`);
+        }
+      });
+
+      // Create download link
+      const url = URL.createObjectURL(zipBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      
+      // Generate zip filename from original file
+      const originalName = file.name.replace(/\.json$/i, '');
+      a.download = `${originalName}_split_${totalConversations}_conversations.zip`;
+      
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      setSplitProgress(prev => prev ? { ...prev, status: 'done' } : null);
+      setMessage({ 
+        type: 'success', 
+        text: `Successfully split into ${totalConversations} files! Download started.` 
+      });
+    } catch (error) {
+      setSplitProgress(prev => prev ? { ...prev, status: 'error' } : null);
+      setMessage({ 
+        type: 'error', 
+        text: error instanceof Error ? error.message : 'Failed to split file' 
+      });
+    } finally {
+      setIsSplitting(false);
+      // Reset file input
+      if (splitFileInputRef.current) {
+        splitFileInputRef.current.value = '';
+      }
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
       <div className="w-full max-w-lg bg-white dark:bg-gray-800 rounded-2xl shadow-xl overflow-hidden">
@@ -289,6 +441,17 @@ export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
           >
             <Upload className="w-4 h-4 inline-block mr-2" />
             Import
+          </button>
+          <button
+            onClick={() => setActiveTab('tools')}
+            className={`flex-1 py-3 text-sm font-medium transition-colors ${
+              activeTab === 'tools'
+                ? 'text-green-600 border-b-2 border-green-600'
+                : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+            }`}
+          >
+            <Scissors className="w-4 h-4 inline-block mr-2" />
+            Tools
           </button>
         </div>
 
@@ -543,6 +706,96 @@ export function ImportExportModal({ isOpen, onClose }: ImportExportModalProps) {
                   <li>ChatGPT conversations.json</li>
                   <li>LibreChat export format</li>
                 </ul>
+              </div>
+            </div>
+          )}
+
+          {/* Tools Tab */}
+          {activeTab === 'tools' && (
+            <div className="space-y-4">
+              {/* JSON Splitter Tool */}
+              <div className="p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
+                <div className="flex items-center gap-3 mb-3">
+                  <div className="p-2 bg-purple-100 dark:bg-purple-900/30 rounded-lg">
+                    <Scissors className="w-5 h-5 text-purple-600 dark:text-purple-400" />
+                  </div>
+                  <div>
+                    <h3 className="font-medium text-gray-900 dark:text-white">
+                      JSON Splitter
+                    </h3>
+                    <p className="text-sm text-gray-500 dark:text-gray-400">
+                      Split a large JSON file into individual conversation files
+                    </p>
+                  </div>
+                </div>
+
+                <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+                  Upload a JSON file containing multiple conversations (like a ChatGPT export).
+                  Each conversation will be saved as a separate JSON file, then bundled into a downloadable ZIP.
+                </p>
+
+                <input
+                  ref={splitFileInputRef}
+                  type="file"
+                  accept=".json"
+                  onChange={handleSplitFile}
+                  className="hidden"
+                />
+
+                {/* Progress indicator during split */}
+                {isSplitting && splitProgress && (
+                  <div className="p-4 bg-purple-50 dark:bg-purple-900/20 rounded-lg space-y-3 mb-4">
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="w-5 h-5 animate-spin text-purple-600" />
+                      <span className="font-medium text-purple-700 dark:text-purple-400">
+                        {splitProgress.status === 'parsing' ? 'Parsing JSON file...' :
+                         splitProgress.status === 'splitting' ? 'Splitting conversations...' :
+                         splitProgress.status === 'zipping' ? 'Creating ZIP file...' :
+                         'Done!'}
+                      </span>
+                    </div>
+                    
+                    {splitProgress.totalConversations > 0 && (
+                      <>
+                        {/* Progress bar */}
+                        <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+                          <div 
+                            className="bg-purple-600 h-2 rounded-full transition-all duration-300"
+                            style={{ 
+                              width: `${(splitProgress.processedConversations / splitProgress.totalConversations) * 100}%` 
+                            }}
+                          />
+                        </div>
+                        
+                        <div className="text-sm text-gray-600 dark:text-gray-400">
+                          {splitProgress.processedConversations} / {splitProgress.totalConversations} conversations processed
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {/* Upload button */}
+                {!isSplitting && (
+                  <button
+                    onClick={() => splitFileInputRef.current?.click()}
+                    className="w-full py-4 border-2 border-dashed border-purple-300 dark:border-purple-600 rounded-lg hover:border-purple-500 dark:hover:border-purple-500 transition-colors flex flex-col items-center gap-2 text-gray-600 dark:text-gray-400 hover:text-purple-600 dark:hover:text-purple-400"
+                  >
+                    <Package className="w-6 h-6" />
+                    <span className="font-medium">Select JSON file to split</span>
+                    <span className="text-xs">Output: ZIP file with individual JSONs</span>
+                  </button>
+                )}
+
+                <div className="mt-4 text-xs text-gray-500 dark:text-gray-400">
+                  <strong>How it works:</strong>
+                  <ul className="list-disc list-inside mt-1 space-y-1">
+                    <li>Parses your JSON array of conversations</li>
+                    <li>Creates a separate .json file for each conversation</li>
+                    <li>Names files using title or ID when available</li>
+                    <li>Packages everything into a compressed ZIP</li>
+                  </ul>
+                </div>
               </div>
             </div>
           )}
